@@ -1,18 +1,20 @@
-"""Tests for the privacy check."""
+"""Tests for the privacy check. Every name, address and number here is invented."""
 
 from __future__ import annotations
 
 import codecs
+import json
 import os
-import random
 import time
+import zlib
 from pathlib import Path
 
 import pytest
 
 from ci_checks import privacy
-from ci_checks._common import Change, Commit, PullRequest, Reporter
+from ci_checks._common import Change, Commit, PullRequest, Reporter, changes
 from helpers import DEPENDABOT, NOREPLY, EventWriter, Repo, pr_event
+from media import ARTIST, ascii_field, exif_segment, gps_position, jpeg, pdf, png, png_chunk, tiff
 
 ALLOWED = privacy.DEFAULT_ALLOWED_DOMAINS
 APACHE_LICENSE = """
@@ -23,11 +25,15 @@ APACHE_LICENSE = """
    Unless required by applicable law or agreed to in writing, software
    distributed under the License is distributed on an "AS IS" BASIS.
 """
-# Short first names, which random bytes spell by chance.
-SHORT_NAMES = "\n".join(
-    "Ugo Leo Eli Luna Max Mia Noa Zoe Tom Eva Lou Ana Ben Sam Kim Ivy Ada Ari Bo Jo".split()
-)
 Capture = pytest.CaptureFixture[str]
+
+
+@pytest.fixture(autouse=True)
+def no_denylist_in_environment(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep denylists of the environment that runs the tests out of them."""
+    for name in list(os.environ):
+        if name.upper().startswith("PRIVACY_DENYLIST") or name == "CI_SECRETS":
+            monkeypatch.delenv(name)
 
 
 @pytest.mark.parametrize(
@@ -41,14 +47,21 @@ Capture = pytest.CaptureFixture[str]
         ("tailnet 100.100.1.1", "private-ip"),
         ("prefix fd12:3456:789a::1", "private-ip"),
         ("link fe80::1c2b:3a4d:5e6f:7081%eth0", "private-ip"),
+        ("snake host_10.0.0.7_backup", "private-ip"),
         ("home 2a01:e0a:1f2:3b40::1", "public-ip"),
         ("contact jane.doe@mail.example-corp.fr", "email"),
         ("author jane.doe+noreply@mail.example-corp.fr", "email"),
         ("author noreply@family-domain.fr", "email"),
-        ("call +33 6 12 34 56 78", "phone"),
-        ("call +1-202-555-0143", "phone"),
-        ("call 06 12 34 56 78", "phone"),
-        ("call 0612345678", "phone"),
+        ("idn mail jane@exämple-corp.fr", "email"),
+        ("call +33 6 41 27 93 58", "phone"),
+        ("call 0033 6 41 27 93 58", "phone"),
+        ("call +33\N{NO-BREAK SPACE}6\N{NO-BREAK SPACE}41\N{NO-BREAK SPACE}27 93 58", "phone"),
+        ("call +1-202-418-3907", "phone"),
+        ("call (202) 418-3907", "phone"),
+        ("call 06 41 27 93 58", "phone"),
+        ("call 06.41.27.93.58", "phone"),
+        ("call 0641279358", "phone"),
+        ("call +44 20 7946 1234", "phone"),
         ("see https://myhome.example-corp.fr/api", "url"),
         ("see http://user:pw@nas.lan:8080/x", "url"),
         ("wan http://82.65.12.34:8123/api", "url"),
@@ -57,27 +70,41 @@ Capture = pytest.CaptureFixture[str]
         ("cam rtsp://cam.family-domain.net/live", "url"),
         ("broker mqtt://broker.family-domain.net:1883", "url"),
         ("idn https://maison-dupré.fr", "url"),
+        ("footnote https://nas.example-corp.fr\N{SUPERSCRIPT ONE}", "url"),
         ("cd /home/alice/projects", "home-path"),
         ("open /Users/bob/Library", "home-path"),
         (r"C:\Users\carol\Desktop", "home-path"),
         (r"C:\\Users\\carol\\Desktop", "home-path"),
         ("C:/Users/carol/Desktop", "home-path"),
+        ("c:/users/carol/Desktop", "home-path"),
+        ("file:///C%3A/Users/carol/x", "home-path"),
         ("wsl /mnt/c/Users/alice/x", "home-path"),
+        (r"share \\wsl$\Ubuntu\home\alice\x", "home-path"),
+        (r"share \\wsl.localhost\Ubuntu\home\alice\x", "home-path"),
         ("silverblue /var/home/alice/x", "home-path"),
         ("usb /run/media/alice/disk", "home-path"),
-        ("mac /Volumes/AliceBackup/x", "home-path"),
-        ("mac 3c:22:fb:12:34:56", "mac"),
-        ("mac 3C-22-FB-12-34-56", "mac"),
+        ("mac 3c:71:bf:4e:92:d5", "mac"),
+        ("mac 3C-71-BF-4E-92-D5", "mac"),
         ("cisco a4c1.381a.2b3c", "mac"),
         ('"mac": "A4C1381A2B3C"', "mac"),
         ("ble_address=a4c1381a2b3c", "mac"),
-        ("ieee 0x00124b0012a3b4c5", "device-id"),
-        ("eui 00:12:4b:00:12:a3:b4:c5", "device-id"),
+        ('wifiMac: "a4c1381a2b3c"', "mac"),
+        ("bssid=a4c1381a2b3c", "mac"),
+        ("ieee 0x00124b0019a3f4c7", "device-id"),
+        ("eui 00:12:4b:00:19:a3:f4:c7", "device-id"),
+        ("ieee_address: 00124b0019a3f4c7", "device-id"),
+        ("extendedAddress=00124b0019a3f4c7", "device-id"),
+        ("node_0x00124b0019a3f4c7", "device-id"),
         ('"latitude": 48.85661', "coordinates"),
         ("lon=2.35222", "coordinates"),
         ("CONF_LATITUDE: 48.85661", "coordinates"),
         ("home_longitude = 2.35222", "coordinates"),
+        ("homeLat: 48.85661", "coordinates"),
         ("center: [48.85661, 2.35222]", "coordinates"),
+        ("geojson [2.35222, 48.85661]", "coordinates"),
+        ("range [123.45678, 2.12345]", "coordinates"),
+        ("pinned at 48.85661, 2.35222 on the map", "coordinates"),
+        ("geo:48.8566,2.3522", "coordinates"),
     ],
 )
 def test_generic_findings_detect(text: str, category: str) -> None:
@@ -93,11 +120,14 @@ def test_generic_findings_detect(text: str, category: str) -> None:
         "release 10.0.0.1.2",
         "router fe80::1, loopback ::1, doc 2001:db8::1, and std::io::Result",
         "ranges 10.0.0.0/8, 192.168.0.0/16, fc00::/7, fd00::/8, fe80::/10 and 2000::/3",
+        "docker 172.17.0.1, supervisor 172.30.32.1 and 172.30.33.4, tailscale 100.100.100.100",
+        "resolvers 2606:4700:4700::1111 and 2001:4860:4860::8888 and doc 3fff::1",
         "time 12:34:56, mac-like aa:bb:cc:dd:ee:ff, ratio 1:2:3",
         "author noreply@example.com and 1+me@users.noreply.github.com",
         "bot no-reply@github.com and noreply@github.com",
         "decorator @pytest.fixture and pkg@1.2.3",
         "remote git@github.com:owner/repo.git",
+        "retina icon@2x.png and logo@3x.webp",
         "docs https://www.home-assistant.io/integrations/ and https://github.com/x/y",
         "local http://homeassistant.local:8123 and http://localhost:8123",
         "test http://api.example.com/v1 and https://foo.test",
@@ -107,15 +137,24 @@ def test_generic_findings_detect(text: str, category: str) -> None:
         "resolver https://1.1.1.1/dns-query and file:///etc/hosts",
         "build 20240101 and +3 votes and timestamp +0100",
         "count 123456789",
+        "fiction +33 1 99 00 12 34, 01 99 00 12 34, +1-202-555-0143 and +44 7700 900123",
+        "placeholder 06 12 34 56 78, 0612345678, +33 6 12 34 56 78, 06 00 00 00 00",
+        "bytes 01 02 03 04 05 06 07 08 and 0a 0b 0c 0d 0e 0f",
         "runner /home/runner/work, /home/user/app and /Users/username/x",
         "devcontainer /home/vscode/.cache and ~/home/x and ./home/x",
-        "media /media/recordings/cam.mp4 and /config/www",
+        "media /media/recordings/cam.mp4 and /config/www and /Volumes/Data/x",
         "placeholder aa:bb:cc:dd:ee:ff and 00:00:5e:00:53:01",
+        "sequential 3c:22:fb:12:34:56 and 00:11:22:33:44:55 and de:ad:be:ef:ca:fe",
+        "frame 01:03:00:0a:00:02 and mask ff:ff:ff:ff:ff:00",
         "sha a4c1381a2b3c and commit 1234567890ab",
-        "zigbee 0x0000000000000000 and 0x0123456789abcdef",
+        "zigbee 0x0000000000000000 and 0x0123456789abcdef and 0x00158d0001a2b3c4",
+        "colors 0xff00ff00ff00ff00",
         '"latitude": 32.87336, "longitude": -117.22743',
         "latitude: 0.000 and ratio lat: 1.5 and flat: 2.345",
-        "point [0.00000, 0.00000] and range [123.45678, 2.12345]",
+        "point [0.00000, 0.00000] and offset [0.12345, 0.54321]",
+        'transform="translate(12.34567, 45.67891)" and rotate (12.34567, 45.67891)',
+        "list 1.23456, 2.34567, 3.45678",
+        "angle [190.12345, 95.12345]",
     ],
 )
 def test_generic_findings_ignore(text: str) -> None:
@@ -132,12 +171,17 @@ def test_generic_findings_stay_fast_on_hostile_lines() -> None:
         "1." * 100_000,
         "+1 " * 70_000,
         ("+1" + "2" * 40 + " ") * 20_000,
+        "00 " * 70_000,
         "/home/" * 40_000,
+        "\\\\wsl$\\" * 30_000,
         "0a:" * 70_000,
+        "0a:1b-" * 40_000,
         "lat=" * 50_000,
         "http://" + "a" * 200_000,
         "[1.123456, " * 50_000,
+        "1.123456, " * 50_000,
         "f:" * 100_000,
+        "geo:1" * 50_000,
     ]
     start = time.perf_counter()
     for line in lines:
@@ -169,76 +213,6 @@ def test_noreply_at_an_allowed_domain() -> None:
     assert privacy.is_noreply_email("noreply@vendor.io", ("vendor.io",))
 
 
-def test_denylist_matching() -> None:
-    denylist = privacy.Denylist(
-        "# comment\n\nBluefinch\nrue des Lilas\nzorb.example-corp.fr\nØrsted Lane\n"
-    )
-    assert denylist
-    assert denylist.terms == ["Bluefinch", "rue des Lilas", "zorb.example-corp.fr", "Ørsted Lane"]
-    assert denylist.matches("Hello BLUEFINCH!")
-    assert denylist.matches("bluefínch with an accent")
-    assert denylist.matches("lives at Rue  des\tlilas")
-    assert denylist.matches("slug rue_des_lilas and rue-des-lilas")
-    assert denylist.matches("https://zorb.example-corp.fr/x")
-    assert denylist.matches("orsted_lane")
-    assert denylist.matches("sensor.bluefinch_door")
-    assert not denylist.matches("bluefinches are birds")
-    assert not denylist.matches("superbluefinch")
-    assert not privacy.Denylist("")
-    assert not privacy.Denylist("").matches("anything")
-    assert not privacy.Denylist("").matches_binary(b"anything")
-    assert privacy.Denylist("").matching_lines("anything") == []
-
-
-def test_denylist_matching_lines_spans_line_breaks() -> None:
-    denylist = privacy.Denylist("rue des Lilas")
-    text = "one\nwe live rue des\nLilas now\nrue des lilas, rue des lilas\n"
-    assert denylist.matching_lines(text) == [2, 4]
-
-
-def test_denylist_matching_lines_is_linear() -> None:
-    denylist = privacy.Denylist("Bluefinch")
-    start = time.perf_counter()
-    assert len(denylist.matching_lines("bluefinch\n" * 200_000)) == 200_000
-    assert denylist.matching_lines("bluefinch " * 500_000) == [1]
-    assert time.perf_counter() - start < 5
-
-
-def test_denylist_in_binary_content() -> None:
-    denylist = privacy.Denylist(f"Bluefinch\n{SHORT_NAMES}")
-    assert denylist.matches_binary(b"\x00\x01Artist\x00Bluefinch\x00")
-    assert denylist.matches_binary(b"\x00<dc:title>Leo on the sofa</dc:title>")
-    assert denylist.matches_binary(b"\xff\xfe" + "Bluefinch".encode("utf-16-le"))
-    assert not denylist.matches_binary(b"\x00IDATxd%Leo#q\x00")
-    assert not denylist.matches_binary(b"\x00Leo\x00")
-
-
-def test_short_terms_do_not_match_random_binary_content() -> None:
-    denylist = privacy.Denylist(SHORT_NAMES)
-    generator = random.Random(1)
-    blobs = [generator.randbytes(200_000) for _ in range(50)]
-    assert not any(denylist.matches_binary(blob) for blob in blobs)
-
-
-def test_redact_path_hides_every_spelling() -> None:
-    denylist = privacy.Denylist("Bluefinch\nrue des Lilas")
-    assert denylist.redact_path("docs/BLUEFINCH/notes.md") == "docs/[redacted]/notes.md"
-    assert denylist.redact_path("a/rue_des_lilas.yaml") == "a/[redacted]"
-    assert denylist.redact_path("rue/des/lilas.md") == "[redacted path]"
-    assert denylist.redact_path("docs/ok.md") == "docs/ok.md"
-
-
-def test_mask_values_cover_spelling_variants() -> None:
-    denylist = privacy.Denylist("Rue des Lilas\nÉté\nZoé\nab")
-    masks = list(privacy.mask_terms(denylist))
-    values = {line.removeprefix("::add-mask::") for line in masks}
-    assert {"Rue des Lilas", "rue des lilas", "RUE DES LILAS", "rue_des_lilas"} <= values
-    assert {"Rue-des-Lilas", "rue.des.lilas", "Été", "ete", "Ete", "ETE"} <= values
-    assert {"Zoé", "zoe", "Zoe", "ZOE"} <= values
-    assert "ab" not in values
-    assert masks == sorted(masks)
-
-
 @pytest.mark.parametrize(
     ("path", "expected"),
     [
@@ -260,11 +234,30 @@ def test_is_license_file(path: str, expected: bool) -> None:
     assert privacy.is_license_file(path) is expected
 
 
+LFS_POINTER = b"version https://git-lfs.github.com/spec/v1\noid sha256:" + b"a" * 64 + b"\nsize 9\n"
+
+
+def test_is_lfs_pointer() -> None:
+    assert privacy.is_lfs_pointer(LFS_POINTER)
+    assert not privacy.is_lfs_pointer(LFS_POINTER + b"x" * 1024)
+    assert not privacy.is_lfs_pointer(b"# Notes\n")
+
+
 def make_check(
     repo: Repo | None, denylist: str = "Bluefinch", exclude: tuple[str, ...] = ()
 ) -> privacy.PrivacyCheck:
     root = repo.root if repo else Path()
     return privacy.PrivacyCheck(root, privacy.Denylist(denylist), (), exclude, Reporter("Privacy"))
+
+
+def test_findings_apply_pragmas_to_every_line_of_a_match() -> None:
+    check = make_check(None)
+    text = "center: [48.85661,\n    2.35222]  # ci-allow: coordinates\n"
+    assert check.findings(text, generic=True) == []
+    found = check.findings(text.replace("ci-allow", "see"), generic=True)
+    assert found == [privacy.Finding(1, 2, "coordinates")]
+    denylisted = [privacy.Finding(1, 1, "denylist")]
+    assert check.findings("Bluefinch 10.0.0.2", generic=False) == denylisted
 
 
 def test_check_files(repo: Repo, capsys: Capture) -> None:
@@ -288,6 +281,17 @@ def test_check_files(repo: Repo, capsys: Capture) -> None:
     assert "file=utf16.txt,line=2::utf16.txt:2: denylisted term." in out
     assert "file=utf16.txt,line=2::utf16.txt:2: possible personal data (private-ip)" in out
     assert "bluefinch" not in out.lower()
+
+
+def test_check_files_reads_legacy_encodings(repo: Repo, capsys: Capture) -> None:
+    repo.write("contacts.csv", "name;city\nHélène Dupont;Lyon\n".encode("cp1252"))
+    repo.write("notes.txt", "ok\r\nhost 10.0.0.2\r\n".encode("utf-16-le"))
+    check = make_check(repo, denylist="Hélène Dupont")
+    check.check_files(["contacts.csv", "notes.txt"])
+    out = capsys.readouterr().out
+    assert check.reporter.count == 2
+    assert "contacts.csv:2: denylisted term." in out
+    assert "notes.txt:2: possible personal data (private-ip)" in out
 
 
 def test_check_files_reads_mid_sized_text_files(repo: Repo, capsys: Capture) -> None:
@@ -322,17 +326,46 @@ def test_check_files_follows_symlink_targets(repo: Repo, capsys: Capture) -> Non
     assert "config: the link target may contain personal data (home-path)." in out
 
 
-def test_check_files_warns_about_files_too_large_to_scan(
+def test_check_files_reports_files_it_cannot_scan(
     repo: Repo, monkeypatch: pytest.MonkeyPatch, capsys: Capture
 ) -> None:
     monkeypatch.setattr(privacy, "MAX_SCAN_BYTES", 10)
     repo.write("big.txt", "x" * 11)
+    (repo.root / "submodule").mkdir()
     check = make_check(repo)
-    check.check_files(["big.txt", "missing.txt"])
+    check.check_files(["big.txt", "missing.txt", "submodule"])
     out = capsys.readouterr().out
-    assert check.reporter.count == 0
+    assert check.reporter.count == 1
     assert "::warning::big.txt: larger than 10 bytes, not scanned." in out
-    assert "missing.txt" not in out
+    assert "missing.txt: tracked but missing from the checkout." in out
+    assert "submodule" not in out
+
+
+def test_check_files_rejects_lfs_pointers(repo: Repo, capsys: Capture) -> None:
+    repo.write("data/devices.csv", LFS_POINTER)
+    check = make_check(repo)
+    check.check_files(["data/devices.csv"])
+    assert check.reporter.count == 1
+    assert "data/devices.csv: stored with Git LFS" in capsys.readouterr().out
+
+
+def test_check_files_reads_binary_metadata(repo: Repo, capsys: Capture) -> None:
+    photo = jpeg(exif_segment(tiff([ascii_field(ARTIST, "jane@example-corp.fr")], gps_position())))
+    repo.write("photo.jpg", photo)
+    repo.write("fixtures/photo.jpg", photo)
+    repo.write("doc.pdf", pdf(b"/Author (Blue\\146inch)"))
+    hidden = png(png_chunk(b"zTXt", b"Comment\0\0" + zlib.compress(b"Bluefinch")))
+    repo.write("icon.png", hidden)
+    repo.write("clean.png", png(png_chunk(b"tEXt", b"Software\0Inkscape")))
+    check = make_check(repo, exclude=("fixtures/*",))
+    check.check_files(["photo.jpg", "fixtures/photo.jpg", "doc.pdf", "icon.png", "clean.png"])
+    out = capsys.readouterr().out
+    assert check.reporter.count == 4
+    assert "photo.jpg: the file metadata may contain personal data (email)." in out
+    assert "photo.jpg: the file metadata may contain personal data (coordinates)." in out
+    assert "doc.pdf: binary content contains a denylisted term." in out
+    assert "icon.png: binary content contains a denylisted term." in out
+    assert "fixtures/photo.jpg" not in out
 
 
 def test_pragma_on_one_line_does_not_cover_the_file(repo: Repo, capsys: Capture) -> None:
@@ -344,81 +377,172 @@ def test_pragma_on_one_line_does_not_cover_the_file(repo: Repo, capsys: Capture)
 
 
 def test_denylist_ignores_exclusions_and_pragmas(repo: Repo, capsys: Capture) -> None:
-    repo.write("fixtures/data.txt", "Bluefinch  # ci-allow: private-ip\n")
+    repo.write("fixtures/data.txt", "Bluefinch  # ci-allow: denylist, private-ip\n")
     check = make_check(repo, exclude=("fixtures/*",))
     check.check_files(["fixtures/data.txt"])
     assert check.reporter.count == 1
     assert "denylisted term" in capsys.readouterr().out
 
 
-def test_denylist_matches_terms_wrapped_over_lines(repo: Repo, capsys: Capture) -> None:
-    repo.write("notes.md", "We meet at rue des\nLilas, then rue_des_lilas.\n")
+@pytest.mark.parametrize(
+    "content",
+    [
+        "We meet at rue des\nLilas, then\n",
+        "We meet at rue   des\n\n  lilas, then\n",
+        "slug: rue_des-lilas\n",
+        "slug: ruedeslilas\n",
+        '"text": "rue des\\nLilas"\n',
+        "Rue des Lîlas\n",
+    ],
+)
+def test_denylist_finds_every_spelling_of_a_term(repo: Repo, capsys: Capture, content: str) -> None:
+    repo.write("notes.md", content)
     check = make_check(repo, denylist="rue des Lilas")
     check.check_files(["notes.md"])
-    assert check.reporter.count == 2
-    out = capsys.readouterr().out
-    assert "notes.md:1: denylisted term." in out
-    assert "notes.md:2: denylisted term." in out
+    assert check.reporter.count == 1
+    assert "notes.md:1: denylisted term." in capsys.readouterr().out
 
 
-def test_check_changes(repo: Repo, capsys: Capture) -> None:
-    repo.write("notes.md", "kept 10.0.0.2\n")
+def history(repo: Repo, base: str) -> list[Change]:
+    return changes(repo.root, [f"{base}..HEAD"])
+
+
+def test_check_changes_finds_content_removed_later(repo: Repo, capsys: Capture) -> None:
+    repo.write("README.md", "# Demo\n")
+    base = repo.commit()
+    repo.write(
+        "notes.md",
+        "kept 10.0.0.2\nremoved 10.0.0.3\nask Bluefinch\n10.0.0.4  # ci-allow: private-ip\n"
+        "token  # gitleaks:allow\n",
+    )
+    repo.write("fixtures/data.txt", "10.0.0.5\n")
+    repo.write("LICENSE", "https://nas.example-corp.fr\n")
     repo.write("image.bin", b"\0 Artist: Bluefinch \0")
-    repo.write("big.txt", "x")
+    repo.write("docs/bluefinch.md", "ok\n")
+    repo.write("docs/wrapped.md", "We meet at rue des\nLilas.\n")
+    repo.write("photo.jpg", jpeg(exif_segment(tiff([], gps_position()))))
+    leak = repo.commit()
+    repo.write("notes.md", "kept 10.0.0.2\n")
+    for path in ("image.bin", "docs/bluefinch.md", "docs/wrapped.md", "photo.jpg"):
+        repo.git("rm", "--quiet", path)
     repo.commit()
-    blob = repo.git("rev-parse", "HEAD:image.bin").strip()
-    text_blob = repo.git("rev-parse", "HEAD:notes.md").strip()
-    big_blob = repo.git("rev-parse", "HEAD:big.txt").strip()
-    sha, bot = "a" * 40, "b" * 40
-    check = make_check(repo, exclude=("fixtures/*",))
-    check.check_changes(
-        [
-            Change(
-                sha,
-                "notes.md",
-                text_blob,
-                (
-                    (1, "kept 10.0.0.2"),
-                    (2, "removed 10.0.0.3"),
-                    (3, "ask Bluefinch"),
-                    (4, "10.0.0.4  # ci-allow: private-ip"),
-                    (5, "token  # gitleaks:allow"),
-                ),
-            ),
-            Change(sha, "docs/bluefinch.md", text_blob, ((1, "ok"),)),
-            Change(sha, "docs/bluefinch.md", "", ()),
-            Change(sha, "fixtures/data.txt", text_blob, ((1, "10.0.0.5"),)),
-            Change(sha, "LICENSE", text_blob, ((1, "https://nas.example-corp.fr"),)),
-            Change(sha, "image.bin", blob, ()),
-            Change(sha, "huge.bin", "c" * 40, ()),
-            Change(bot, "requirements.txt", text_blob, ((1, "x==1  # https://pkgs.vendor.io"),)),
-        ],
-        exempt={bot},
-    )
+    check = make_check(repo, denylist="Bluefinch\nrue des Lilas", exclude=("fixtures/*",))
+    check.check_changes(history(repo, base), exempt=set())
     out = capsys.readouterr().out
-    assert check.reporter.count == 4
-    assert (
-        "Commit aaaaaaaaaaaa: notes.md:2: an added line may contain personal data (private-ip)"
-        in out
-    )
-    assert "Commit aaaaaaaaaaaa: notes.md:3: an added line has a denylisted term." in out
-    assert "Commit aaaaaaaaaaaa: notes.md:5: gitleaks:allow hides the line" in out
-    assert out.count("Commit aaaaaaaaaaaa: a file path contains a denylisted term.") == 1
-    assert "Commit aaaaaaaaaaaa: image.bin: binary content contains a denylisted term." in out
-    assert "::warning::Commit aaaaaaaaaaaa: huge.bin: larger than" in out
-    assert big_blob
+    short = leak[:12]
+    assert check.reporter.count == 6
+    assert f"Commit {short}: notes.md:2: an added line may contain personal data" in out
+    assert f"Commit {short}: notes.md:3: an added line has a denylisted term." in out
+    assert f"Commit {short}: notes.md:5: gitleaks:allow hides the line" in out
+    assert out.count(f"Commit {short}: a file path contains a denylisted term.") == 1
+    assert f"Commit {short}: image.bin: binary content contains a denylisted term." in out
+    assert f"Commit {short}: docs/wrapped.md:1: an added line has a denylisted term." in out
+    assert f"Commit {short}: photo.jpg: the file metadata may contain personal data" in out
+    assert "notes.md:1:" not in out
     assert "bluefinch" not in out.lower()
 
 
-def test_check_changes_reads_utf16_files_whole(repo: Repo, capsys: Capture) -> None:
-    repo.write("notes.txt", codecs.BOM_UTF16_LE + "ok\nhost 10.0.0.2\n".encode("utf-16-le"))
+def test_check_changes_blame_only_the_commit_that_added_a_line(repo: Repo, capsys: Capture) -> None:
+    repo.write("README.md", "# Demo\n")
+    base = repo.commit()
+    repo.write("notes.md", "title\nhost 10.0.0.2\nend\n")
+    first = repo.commit()
+    repo.write("notes.md", "new title\nhost 10.0.0.2\nend\n")
     repo.commit()
-    blob = repo.git("rev-parse", "HEAD:notes.txt").strip()
-    repo.write("notes.txt", "ok\n")
+    repo.write("notes.md", "new title\nend\n")
+    repo.commit()
     check = make_check(repo)
-    check.check_changes([Change("a" * 40, "notes.txt", blob, ((1, "garbled"),))], set())
+    check.check_changes(history(repo, base), exempt=set())
+    out = capsys.readouterr().out
     assert check.reporter.count == 1
-    assert "notes.txt:2: an added line may contain personal data" in capsys.readouterr().out
+    assert f"Commit {first[:12]}: notes.md:2: an added line may contain personal data" in out
+
+
+def test_check_changes_reads_lines_with_carriage_returns(repo: Repo, capsys: Capture) -> None:
+    repo.write("README.md", "# Demo\n")
+    base = repo.commit()
+    repo.write("devices.csv", b"name,ip\rnas,10.0.0.2\rBluefinch,x\r")
+    repo.write("log.txt", b"progress 10%\r\x1edone\nhost 10.0.0.3\n")
+    leak = repo.commit()
+    repo.git("rm", "--quiet", "devices.csv", "log.txt")
+    repo.commit()
+    check = make_check(repo)
+    check.check_changes(history(repo, base), exempt=set())
+    out = capsys.readouterr().out
+    assert check.reporter.count == 3
+    assert f"Commit {leak[:12]}: devices.csv:1: an added line has a denylisted term." in out
+    assert f"Commit {leak[:12]}: devices.csv:1: an added line may contain personal data" in out
+    assert f"Commit {leak[:12]}: log.txt:2: an added line may contain personal data" in out
+
+
+def test_check_changes_reads_files_git_does_not_diff(repo: Repo, capsys: Capture) -> None:
+    repo.write("README.md", "# Demo\n")
+    base = repo.commit()
+    repo.write("notes.txt", codecs.BOM_UTF16_LE + "ok\nhost 10.0.0.2\n".encode("utf-16-le"))
+    repo.write("devices.csv", LFS_POINTER)
+    leak = repo.commit()
+    repo.write("notes.txt", "ok\n")
+    repo.commit()
+    check = make_check(repo)
+    check.check_changes(history(repo, base), exempt=set())
+    out = capsys.readouterr().out
+    assert check.reporter.count == 2
+    assert f"Commit {leak[:12]}: notes.txt:2: an added line may contain personal data" in out
+    assert f"Commit {leak[:12]}: devices.csv: stored with Git LFS" in out
+
+
+def test_check_changes_skip_submodules(repo: Repo, capsys: Capture) -> None:
+    repo.write("README.md", "# Demo\n")
+    base = repo.commit()
+    repo.git("update-index", "--add", "--cacheinfo", f"160000,{base},vendor/lib")
+    repo.commit()
+    (repo.root / "vendor" / "lib").mkdir(parents=True)
+    check = make_check(repo)
+    check.check_changes(history(repo, base), exempt=set())
+    check.check_files(["vendor/lib"])
+    assert check.reporter.count == 0
+    assert capsys.readouterr().out == ""
+
+
+def test_check_changes_report_blobs_it_cannot_scan(
+    repo: Repo, monkeypatch: pytest.MonkeyPatch, capsys: Capture
+) -> None:
+    repo.write("big.txt", "x" * 11)
+    repo.commit()
+    big = repo.git("rev-parse", "HEAD:big.txt").strip()
+    monkeypatch.setattr(privacy, "MAX_SCAN_BYTES", 10)
+    sha = "a" * 40
+    check = make_check(repo)
+    check.check_changes(
+        [
+            Change(sha, "big.txt", big, "100644", frozenset({1})),
+            Change(sha, "gone.txt", "c" * 40, "100644", frozenset({1})),
+            Change(sha, "deleted.txt", "", "100644", frozenset()),
+        ],
+        exempt=set(),
+    )
+    out = capsys.readouterr().out
+    assert check.reporter.count == 1
+    assert "::warning::Commit aaaaaaaaaaaa: big.txt: larger than 10 bytes, not scanned." in out
+    assert "Commit aaaaaaaaaaaa: gone.txt: the content could not be read" in out
+
+
+def test_check_changes_exempt_commits_skip_generic_patterns(repo: Repo, capsys: Capture) -> None:
+    repo.write("requirements.txt", "x==1\n")
+    base = repo.commit()
+    repo.write("requirements.txt", "x==2  # https://pkgs.vendor.io/x\n")
+    bot = repo.commit(name="dependabot[bot]", email=DEPENDABOT)
+    repo.write("requirements.txt", "x==2  # https://pkgs.vendor.io/x Bluefinch\n")
+    person = repo.commit()
+    repo.write("requirements.txt", "x==2\n")
+    repo.commit()
+    check = make_check(repo)
+    check.check_changes(history(repo, base), exempt={bot})
+    out = capsys.readouterr().out
+    assert check.reporter.count == 2
+    assert f"Commit {person[:12]}: requirements.txt:1: an added line has a denylisted term" in out
+    assert f"Commit {person[:12]}: requirements.txt:1: an added line may contain" in out
+    assert f"Commit {bot[:12]}" not in out
 
 
 def commit(**changes: str) -> Commit:
@@ -463,6 +587,7 @@ def test_check_messages(capsys: Capture) -> None:
         [
             commit(),
             commit(message="docs: see https://nas.example-corp.fr"),
+            commit(message="docs: link\n\nhttps://docs.vendor.io/x  ci-allow: url"),
             commit(sha="b" * 40, message=trailer, author_email=DEPENDABOT),
         ],
         exempt={"b" * 40},
@@ -487,6 +612,7 @@ def pr(**changes: str | bool) -> PullRequest:
 def test_check_pull_request(capsys: Capture) -> None:
     check = make_check(None)
     check.check_pull_request(pr())
+    check.check_pull_request(pr(body="Docs at https://docs.vendor.io <!-- ci-allow: url -->"))
     assert check.reporter.count == 0
 
     check.check_pull_request(
@@ -509,10 +635,12 @@ def test_dependency_bot_body_skips_generic_patterns_but_not_denylist() -> None:
     assert check.reporter.count == 2
 
 
-def run_main(repo: Repo, monkeypatch: pytest.MonkeyPatch, denylist: str | None, *args: str) -> int:
-    if denylist is None:
-        monkeypatch.delenv("PRIVACY_DENYLIST", raising=False)
-    else:
+def run_main(
+    repo: Repo, monkeypatch: pytest.MonkeyPatch, denylist: str | dict | None, *args: str
+) -> int:
+    if isinstance(denylist, dict):
+        monkeypatch.setenv("CI_SECRETS", json.dumps(denylist))
+    elif denylist is not None:
         monkeypatch.setenv("PRIVACY_DENYLIST", denylist)
     return privacy.main(["--root", str(repo.root), *args])
 
@@ -528,14 +656,49 @@ def test_main_clean_push(
     out = capsys.readouterr().out
     assert out.startswith("::add-mask::")
     assert "::add-mask::Bluefinch" in out
+    assert "Privacy: 1 denylist secret(s) read." in out
     assert "Privacy: no problem found." in out
 
 
 def test_main_mask_only(repo: Repo, monkeypatch: pytest.MonkeyPatch, capsys: Capture) -> None:
-    assert run_main(repo, monkeypatch, "Bluefinch", "--mask-only") == 0
+    secrets = {"PRIVACY_DENYLIST_A": "Bluefinch", "PRIVACY_DENYLIST_B": "rue des Lilas"}
+    assert run_main(repo, monkeypatch, secrets, "--mask-only") == 0
     out = capsys.readouterr().out
     assert "::add-mask::BLUEFINCH" in out
+    assert "::add-mask::rue_des_lilas" in out
     assert "Privacy" not in out
+    assert "CI_SECRETS" not in os.environ
+
+
+def test_main_reads_every_denylist_secret(
+    repo: Repo, monkeypatch: pytest.MonkeyPatch, event: EventWriter, capsys: Capture
+) -> None:
+    repo.write("notes.md", "Ask Bluefinch.\nMeet at rue des\nLilas.\n")
+    repo.commit()
+    event({})
+    secrets = {
+        "github_token": "unrelated",
+        "DEPLOY_KEY": "unrelated",
+        "PRIVACY_DENYLIST": "Bluefinch",
+        "PRIVACY_DENYLIST_STREETS": "rue des Lilas",
+        "PRIVACY_DENYLIST_EMPTY": "# nothing yet\n",
+    }
+    assert run_main(repo, monkeypatch, secrets) == 1
+    out = capsys.readouterr().out
+    assert "Privacy: 3 denylist secret(s) read." in out
+    assert "::warning::1 of the 3 denylist secrets are empty." in out
+    assert "notes.md:1: denylisted term." in out
+    assert "notes.md:2: denylisted term." in out
+    assert "STREETS" not in out
+    assert "unrelated" not in out
+
+
+def test_main_rejects_secrets_that_are_not_json(
+    repo: Repo, monkeypatch: pytest.MonkeyPatch, capsys: Capture
+) -> None:
+    monkeypatch.setenv("CI_SECRETS", "{oops")
+    assert privacy.main(["--root", str(repo.root)]) == 1
+    assert "CI_SECRETS does not hold valid JSON." in capsys.readouterr().err
 
 
 def test_main_pull_request(
@@ -571,6 +734,22 @@ def test_main_finds_content_added_then_removed(
     assert f"Commit {leak[:12]}: README.md:2: an added line may contain personal data" in out
     assert f"Commit {leak[:12]}: photo.jpg: binary content contains a denylisted term." in out
     assert "bluefinch" not in out.lower().replace("::add-mask::bluefinch", "")
+
+
+def test_main_reads_files_with_odd_names(
+    repo: Repo, monkeypatch: pytest.MonkeyPatch, event: EventWriter, capsys: Capture
+) -> None:
+    repo.write("README.md", "# Demo\n")
+    repo.commit()
+    (repo.root / "notes\r.txt").write_text("owner Bluefinch\n", encoding="utf-8")
+    (repo.root / os.fsdecode(b"caf\xe9.txt")).write_text("host 10.0.0.2\n", encoding="utf-8")
+    repo.commit()
+    event({})
+    assert run_main(repo, monkeypatch, "Bluefinch") == 1
+    out = capsys.readouterr().out
+    assert "notes%0D.txt:1: denylisted term." in out
+    assert "café.txt:1: possible personal data (private-ip)" in out
+    assert "missing" not in out
 
 
 def test_main_scans_the_whole_first_push(
@@ -634,10 +813,15 @@ def test_main_missing_denylist(
     head = repo.commit()
     event({})
     assert run_main(repo, monkeypatch, None) == 1
-    assert "PRIVACY_DENYLIST is empty" in capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert "No denylist found." in out
+    assert "secrets: inherit" in out
 
+    assert run_main(repo, monkeypatch, {"PRIVACY_DENYLIST": "", "PRIVACY_DENYLIST_X": " "}) == 1
+    assert "No denylist found." in capsys.readouterr().out
     assert run_main(repo, monkeypatch, "", "--require-denylist", "false") == 0
 
+    monkeypatch.delenv("PRIVACY_DENYLIST")
     event(pr_event(head, head, fork=True))
     assert run_main(repo, monkeypatch, None) == 1
     assert "not available to pull requests from forks" in capsys.readouterr().out

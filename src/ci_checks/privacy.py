@@ -7,8 +7,9 @@ Two kinds of checks run:
   home directory paths, MAC addresses, Zigbee and Thread device addresses,
   and geographic coordinates. A line can opt out of one category with a
   `ci-allow: <category>` comment, and paths can be excluded with globs.
-* A denylist of terms read from the PRIVACY_DENYLIST environment variable,
-  one term per line. It applies everywhere and cannot be opted out of.
+* A denylist of terms, one per line, merged from every secret whose name
+  starts with PRIVACY_DENYLIST (see ci_checks.denylist.denylist_sources).
+  It applies everywhere and cannot be opted out of.
 
 What is scanned:
 
@@ -19,9 +20,10 @@ What is scanned:
 * the author, committer and message of every commit in the history;
 * the pull request title, body and branch name.
 
-Binary files are only checked against the denylist, in their readable
-strings. Findings only report where something was found, never the matched
-text, so that the log does not repeat the data it is protecting.
+Binary files are checked in their metadata (see ci_checks.metadata) and,
+for the denylist, in their readable strings. Findings only report where
+something was found, never the matched text, so that the log does not
+repeat the data it is protecting.
 """
 
 from __future__ import annotations
@@ -31,11 +33,14 @@ import ipaddress
 import os
 import re
 import sys
-import unicodedata
-from collections.abc import Iterable, Iterator
+from bisect import bisect_right
+from collections.abc import Callable, Iterable, Iterator
+from dataclasses import dataclass
+from itertools import pairwise
 from pathlib import Path, PurePosixPath
 
 from ci_checks._common import (
+    GITLINK_MODE,
     MAX_SCAN_BYTES,
     Change,
     CheckError,
@@ -48,6 +53,7 @@ from ci_checks._common import (
     commits,
     decode_text,
     dependency_bot_commits,
+    display_path,
     fail,
     history_tip,
     load_event,
@@ -60,23 +66,30 @@ from ci_checks._common import (
     split_list,
     tracked_files,
 )
+from ci_checks.denylist import Denylist, denylist_sources, location
+from ci_checks.metadata import read_metadata
 
 DEFAULT_ALLOWED_DOMAINS = (
     "astral.sh",
     "conventionalcommits.org",
+    "creativecommons.org",
     "github.com",
     "githubusercontent.com",
     "hacs.xyz",
     "home-assistant.io",
+    "inkscape.org",
     "json-schema.org",
     "keepachangelog.com",
+    "ns.adobe.com",
     "opensource.org",
+    "purl.org",
     "pypi.org",
     "python.org",
     "pythonhosted.org",
     "schemastore.org",
     "semver.org",
     "shields.io",
+    "sodipodi.sourceforge.net",
     "spdx.org",
     "w3.org",
 )
@@ -107,31 +120,58 @@ PRIVATE_NETWORKS = tuple(
     )
 )
 GLOBAL_IPV6 = ipaddress.ip_network("2000::/3")
+# Ranges reserved for documentation (RFC 5737, RFC 3849, RFC 9637).
+DOCUMENTATION_NETWORKS = tuple(
+    ipaddress.ip_network(net)
+    for net in ("192.0.2.0/24", "198.51.100.0/24", "203.0.113.0/24", "2001:db8::/32", "3fff::/20")
+)
+# Networks that are the same on every installation: the Home Assistant
+# Supervisor network, which apps with ingress must allow.
+GENERIC_NETWORKS = (ipaddress.ip_network("172.30.32.0/23"),)
 # Addresses that are the same in every network: the start of each range
-# above, as in "10.0.0.0/8", and the usual router link-local address.
+# above, as in "10.0.0.0/8", the usual router link-local address, the
+# Docker default bridge and the Tailscale DNS resolver.
 GENERIC_ADDRESSES = frozenset(
     {network.network_address for network in (*PRIVATE_NETWORKS, GLOBAL_IPV6)}
-    | {ipaddress.ip_address("fd00::"), ipaddress.ip_address("fe80::1")}
+    | {
+        ipaddress.ip_address(address)
+        for address in ("fd00::", "fe80::1", "172.17.0.1", "100.100.100.100")
+    }
 )
 # Public services whose addresses are the same for everyone.
 PUBLIC_RESOLVERS = frozenset(
     ipaddress.ip_address(address)
     for address in (
         "1.0.0.1",
+        "1.0.0.2",
+        "1.0.0.3",
         "1.1.1.1",
+        "1.1.1.2",
+        "1.1.1.3",
         "8.8.4.4",
         "8.8.8.8",
         "9.9.9.9",
+        "94.140.14.14",
+        "94.140.15.15",
         "149.112.112.112",
+        "208.67.220.220",
+        "208.67.222.222",
+        "2001:4860:4860::64",
+        "2001:4860:4860::6464",
         "2001:4860:4860::8844",
         "2001:4860:4860::8888",
         "2606:4700:4700::1001",
         "2606:4700:4700::1111",
+        "2620:119:35::35",
+        "2620:119:53::53",
         "2620:fe::9",
         "2620:fe::fe",
+        "2a10:50c0::ad1:ff",
+        "2a10:50c0::ad2:ff",
     )
 )
-# Hardware addresses that are obviously placeholders.
+# Hardware addresses that are obviously placeholders, and the words that
+# placeholders spell in hexadecimal.
 PLACEHOLDER_HEX = {
     "0011223344556677",
     "001122334455",
@@ -144,6 +184,29 @@ PLACEHOLDER_HEX = {
     "aabbccddeeff",
     "aabbccddeeff0011",
 }
+HEX_WORDS = ("babe", "bead", "beef", "c0de", "cafe", "d00d", "dead", "deaf", "f00d", "face", "feed")
+# Telephone ranges reserved for fiction and documentation: France (ARCEP),
+# North America (555-0100 to 555-0199) and the United Kingdom (Ofcom).
+FICTION_PHONE_PREFIXES = (
+    "33199",
+    "332619",
+    "333530",
+    "334657",
+    "335364",
+    "336399",
+    "44113496",
+    "44115496",
+    "44117496",
+    "44118496",
+    "44121496",
+    "44131496",
+    "44141496",
+    "44151496",
+    "44161496",
+    "44191498",
+    "442079460",
+    "447700900",
+)
 # Coordinates used by the Home Assistant test harness.
 PLACEHOLDER_COORDINATES = {"32.87336", "-117.22743"}
 HOME_DIRECTORY_PLACEHOLDERS = {
@@ -154,6 +217,7 @@ HOME_DIRECTORY_PLACEHOLDERS = {
     "example",
     "ha",
     "homeassistant",
+    "linuxbrew",
     "me",
     "name",
     "node",
@@ -168,59 +232,109 @@ HOME_DIRECTORY_PLACEHOLDERS = {
     "vscode",
     "you",
 }
+# The last label of a file name such as icon@2x.png, which looks like an
+# e-mail address.
+FILE_EXTENSIONS = frozenset(
+    {"avif", "bmp", "gif", "heic", "ico", "jpeg", "jpg", "mov", "mp4", "pdf", "png", "svg"}
+    | {"tif", "tiff", "webm", "webp"}
+)
+# Metadata categories: URLs are left out, because metadata formats name
+# their schemas with URLs.
+METADATA_CATEGORIES = (
+    "private-ip",
+    "public-ip",
+    "email",
+    "phone",
+    "home-path",
+    "mac",
+    "device-id",
+    "coordinates",
+)
+DENYLIST = "denylist"
+# Lines of context scanned around added lines, so that a term or a pair of
+# coordinates spread over several lines is still found.
+CONTEXT_LINES = 5
+LFS_POINTER = b"version https://git-lfs.github.com/spec/v1\n"
 # License texts quote their authors' sites: LICENSE, LICENSE.md,
 # LICENSE-APACHE, COPYING.LESSER, NOTICE.txt and the like.
 _LICENSE_FILE = re.compile(
     r"^(?i:licen[cs]e|copying|notice)(?:[-.][A-Z0-9][A-Za-z0-9.-]*)?(?:\.(?:md|rst|txt))?$"
 )
-# Readable strings of binary content: printable ASCII or UTF-8 letters, or
-# printable ASCII in UTF-16. Shorter runs are left out, since random bytes
-# form them by chance.
-MIN_STRING_LENGTH = 8
-_STRING_RUN = re.compile(
-    rb"(?:[\t\x20-\x7e]|[\xc2-\xdf][\x80-\xbf]|[\xe0-\xef][\x80-\xbf]{2}){%d,}" % MIN_STRING_LENGTH
-)
-_UTF16_RUN = re.compile(rb"(?:[\t\x20-\x7e]\x00){%d,}" % MIN_STRING_LENGTH)
-_NOT_PHRASE = re.compile(r"[^\w .,'/:-]+|_+")
-# Letters a term needs to be looked for anywhere in binary content.
-MIN_BINARY_TERM = 5
 
-_IPV4 = re.compile(r"(?<![\w.])(\d{1,3}(?:\.\d{1,3}){3})(?!\w|\.\d)")
-_IPV6 = re.compile(r"(?<![\w:.%])([0-9A-Fa-f]{0,4}(?::[0-9A-Fa-f]{0,4}){2,7})(?![\w:])")
+_IPV4 = re.compile(r"(?<![A-Za-z0-9.])(\d{1,3}(?:\.\d{1,3}){3})(?![A-Za-z0-9]|\.\d)")
+_IPV6 = re.compile(
+    r"(?<![A-Za-z0-9:.%])([0-9A-Fa-f]{0,4}(?::[0-9A-Fa-f]{0,4}){2,7})(?![A-Za-z0-9:])"
+)
 _EMAIL = re.compile(
-    r"(?<![A-Za-z0-9._%+-])[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}\b"
+    r"(?<![A-Za-z0-9._%+-])[A-Za-z0-9._%+-]+@(?:[^\W_]|-)+(?:\.(?:[^\W_]|-)+)*\.[^\W\d_]{2,}\b"
 )
 _URL = re.compile(r"\b([A-Za-z][A-Za-z0-9+.-]{0,15})://(?:[^\s/@\"'<>]*@)?(\[[\w:.%]*\]|[\w.-]*)")
-# The run of digits and separators is bounded, so that a long line of digits
-# cannot make the search backtrack; the digit count is checked afterwards.
-_PHONE_INTERNATIONAL = re.compile(r"(?<![\w+])\+\d[\d .()-]{6,22}\d(?!\w)")
-_PHONE_NATIONAL = re.compile(r"(?<![\w.])(?:0[1-9](?:[ .-]\d{2}){4}|0[67]\d{8})(?![\w.])")
+# Separators between the digits of a phone number, including the no-break
+# spaces that word processors insert.
+_SEP = "[ .\\-\N{NO-BREAK SPACE}\N{NARROW NO-BREAK SPACE}\N{THIN SPACE}]"
+# The runs of digits and separators are bounded, so that a long line of
+# digits cannot make the search backtrack; digit counts are checked after.
+_PHONE_INTERNATIONAL = re.compile(
+    rf"(?<![\w+])(?:\+[1-9][\d(){_SEP[1:-1]}]{{6,22}}|00[1-9]\d{{0,2}}{_SEP}[\d(){_SEP[1:-1]}]{{5,20}})"
+    r"\d(?!\w)"
+)
+# French numbers, in groups of two digits or written together. A group run
+# that goes on, as in a byte dump or a MAC address, is not a number.
+_PHONE_NATIONAL = re.compile(
+    rf"(?<!\w)(?<!\d\.)(?<![0-9A-Fa-f]{{2}}{_SEP})"
+    rf"(?:0[1-9](?:{_SEP}\d{{2}}){{4}}(?!{_SEP}[0-9A-Fa-f]{{2}}(?![0-9A-Za-z]))|0[1-9]\d{{8}})"
+    r"(?!\w|\.\d)"
+)
+_PHONE_NORTH_AMERICA = re.compile(r"(?<![\w)])\(\d{3}\)[ \N{NO-BREAK SPACE}]?\d{3}-\d{4}(?![\w-])")
 _HOME_PATH = re.compile(
     r"(?<![\w.~%-])"
-    r"(?:/home|/Users|/var/home|/run/media|/Volumes|/mnt/[A-Za-z]/Users"
-    r"|[A-Za-z]:(?:\\{1,2}|/)Users)"
+    r"(?:/home|/Users|/var/home|/run/media|/mnt/[A-Za-z]/(?i:users)"
+    r"|[A-Za-z](?::|%3[Aa])(?:\\{1,2}|/)(?i:users)"
+    r"|\\{2,4}wsl(?:\.localhost|\$)\\{1,2}[^\\/\s]+\\{1,2}home)"
     r"[/\\]{1,2}([\w.-]+)"
 )
-_MAC = re.compile(r"(?<![0-9A-Fa-f:-])((?:[0-9A-Fa-f]{2}[:-]){5}[0-9A-Fa-f]{2})(?![0-9A-Fa-f:-])")
+# Groups of two hex digits separated by colons or hyphens, as MAC addresses
+# (six groups) and EUI-64 device addresses (eight groups) are written.
+_HEX_RUN = re.compile(r"(?<![0-9A-Fa-f])[0-9A-Fa-f]{2}(?:[:-][0-9A-Fa-f]{2})+(?![0-9A-Fa-f])")
 _MAC_DOTTED = re.compile(
     r"(?<![0-9A-Fa-f.])([0-9A-Fa-f]{4}\.[0-9A-Fa-f]{4}\.[0-9A-Fa-f]{4})(?![0-9A-Fa-f.])"
 )
-# Twelve hex digits are a MAC address only next to a key that says so.
+# A key name starts a word, or a camel case part such as the "Mac" of
+# "wifiMac".
+_KEY_START = r"(?:(?<![A-Za-z])|(?<=[a-z])(?=[A-Z]))"
+_KEY_VALUE = r"[\"']?\s*[:=]\s*[\"']?"
+# Hex digits without separators are an address only next to a key that says so.
 _MAC_BARE = re.compile(
-    r"(?<![A-Za-z])(?:mac|bssid|(?:mac|ble|bt|bd)_?addr(?:ess)?)[\"']?\s*[:=]\s*[\"']?"
-    r"([0-9A-Fa-f]{12})(?![0-9A-Fa-f])",
-    re.IGNORECASE,
+    _KEY_START
+    + r"(?i:mac|bssid|(?:mac|ble|bt|bd)_?addr(?:ess)?)"
+    + _KEY_VALUE
+    + r"([0-9A-Fa-f]{12})(?![0-9A-Fa-f])"
 )
-_EUI64 = re.compile(r"(?<![\w:])(0x[0-9A-Fa-f]{16}|(?:[0-9A-Fa-f]{2}:){7}[0-9A-Fa-f]{2})(?![\w:])")
+_EUI64 = re.compile(r"(?<![0-9A-Za-z:])0x([0-9A-Fa-f]{16})(?![0-9A-Fa-f:])")
+_EUI64_BARE = re.compile(
+    _KEY_START
+    + r"(?i:ieee(?:_?addr(?:ess)?)?|ext(?:ended)?_?addr(?:ess)?|eui_?64)"
+    + _KEY_VALUE
+    + r"(?:0x)?([0-9A-Fa-f]{16})(?![0-9A-Fa-f])"
+)
 _COORDINATE = re.compile(
-    r"(?<![A-Za-z])(?:lat|latitude|lon|lng|long|longitude)(?![A-Za-z])[\"']?\s*[:=]\s*[\"']?"
-    r"(-?\d{1,3}\.\d{3,})",
-    re.IGNORECASE,
+    _KEY_START
+    + r"(?i:lat|latitude|lon|lng|long|longitude)(?![a-z])"
+    + _KEY_VALUE
+    + r"(-?\d{1,3}\.\d{3,})"
 )
-_COORDINATE_PAIR = re.compile(r"[\[(]\s*(-?\d{1,2}\.\d{5,})\s*,\s*(-?\d{1,3}\.\d{5,})\s*[\])]")
+_COORDINATE_PAIR = re.compile(r"[\[(]\s*(-?\d{1,3}\.\d{5,})\s*,\s*(-?\d{1,3}\.\d{5,})\s*[\])]")
+# A pair written in a sentence, as map applications copy it, but not a
+# number in a longer list.
+_COORDINATE_TEXT = re.compile(
+    r"(?<![\w.,:-])(?<!, )(-?\d{1,3}\.\d{5,}), (-?\d{1,3}\.\d{5,})(?![\w.]|, ?-?\d)"
+)
+_GEO_URI = re.compile(r"\bgeo:(-?\d{1,2}(?:\.\d+)?),(-?\d{1,3}(?:\.\d+)?)")
+_SVG_TRANSFORM = re.compile(r"(?:matrix|rotate|scale|skewX|skewY|translate)\s*\(?\s*$")
 _NOREPLY_LOCAL = re.compile(r"^(?:no-?reply|do-?not-?reply)$", re.IGNORECASE)
 
 IPAddress = ipaddress.IPv4Address | ipaddress.IPv6Address
+Span = tuple[int, int]
 
 
 def _domain_allowed(host: str, domains: Iterable[str]) -> bool:
@@ -248,7 +362,7 @@ def _parse_ip(value: str) -> IPAddress | None:
     value = value.strip("[]").partition("%")[0]
     if ":" not in value:
         octets = value.split(".")
-        if len(octets) != 4 or not all(octet.isdigit() for octet in octets):
+        if len(octets) != 4 or not all(octet.isascii() and octet.isdigit() for octet in octets):
             return None
         value = ".".join(str(int(octet)) for octet in octets)  # Drop leading zeros.
     try:
@@ -257,8 +371,14 @@ def _parse_ip(value: str) -> IPAddress | None:
         return None
 
 
-def _is_private(address: IPAddress) -> bool:
-    return any(address in network for network in PRIVATE_NETWORKS)
+def _in_any(
+    address: IPAddress, networks: Iterable[ipaddress.IPv4Network | ipaddress.IPv6Network]
+) -> bool:
+    return any(address in network for network in networks)
+
+
+def _is_generic(address: IPAddress) -> bool:
+    return address in GENERIC_ADDRESSES or _in_any(address, GENERIC_NETWORKS)
 
 
 def _is_personal_public(address: IPAddress) -> bool:
@@ -266,246 +386,236 @@ def _is_personal_public(address: IPAddress) -> bool:
         address.is_global
         and not address.is_multicast
         and address not in PUBLIC_RESOLVERS
-        and address not in GENERIC_ADDRESSES
+        and not _is_generic(address)
+        and not _in_any(address, DOCUMENTATION_NETWORKS)
     )
 
 
-def _is_placeholder_hex(value: str) -> bool:
-    digits = re.sub(r"^0x|[:.-]", "", value.lower())
-    return len(set(digits)) <= 2 or digits in PLACEHOLDER_HEX
+def _private_ip(text: str, _allowed: tuple[str, ...]) -> Iterator[Span]:
+    for match in (*_IPV4.finditer(text), *_IPV6.finditer(text)):
+        address = _parse_ip(match.group(1))
+        if address is not None and _in_any(address, PRIVATE_NETWORKS) and not _is_generic(address):
+            yield match.span(1)
 
 
-def _private_ip(text: str) -> bool:
-    candidates = [m.group(1) for m in _IPV4.finditer(text)]
-    candidates += [m.group(1) for m in _IPV6.finditer(text)]
-    for candidate in candidates:
-        address = _parse_ip(candidate)
-        if address is not None and address not in GENERIC_ADDRESSES and _is_private(address):
-            return True
-    return False
-
-
-def _public_ip(text: str) -> bool:
+def _public_ip(text: str, _allowed: tuple[str, ...]) -> Iterator[Span]:
     # Public IPv4 addresses look like version numbers, so only IPv6 is checked
     # here; public addresses of both kinds are also caught in URLs.
     for match in _IPV6.finditer(text):
         address = _parse_ip(match.group(1))
         if address is not None and address in GLOBAL_IPV6 and _is_personal_public(address):
-            return True
-    return False
+            yield match.span(1)
 
 
-def _email(text: str, allowed_domains: Iterable[str]) -> bool:
+def _email(text: str, allowed: tuple[str, ...]) -> Iterator[Span]:
     for match in _EMAIL.finditer(text):
-        if text[match.end() : match.end() + 1] == ":":
+        local, _, domain = match.group(0).rpartition("@")
+        after = text[match.end() : match.end() + 2]
+        if local.lower() == "git" and after[:1] == ":" and after[1:2].strip():
             continue  # SSH remote such as git@github.com:owner/repo.
-        if not is_noreply_email(match.group(0), allowed_domains):
-            return True
-    return False
+        if domain.rpartition(".")[2].lower() in FILE_EXTENSIONS:
+            continue  # File name such as icon@2x.png.
+        if not is_noreply_email(match.group(0), allowed):
+            yield match.span()
 
 
-def _phone(text: str) -> bool:
+def _is_placeholder_number(digits: str) -> bool:
+    pairs = [int(digits[i : i + 2]) for i in range(len(digits) % 2, len(digits), 2)]
+    return (
+        len(set(digits)) <= 2
+        or any(run in digits for run in ("123456", "234567", "345678", "456789", "567890"))
+        or all(second == first + 1 for first, second in pairwise(pairs))
+    )
+
+
+def _is_fiction(international: str) -> bool:
+    if international.startswith("1") and len(international) == 11:
+        return international[4:7] == "555" and international[7:9] == "01"
+    return international.startswith(FICTION_PHONE_PREFIXES)
+
+
+def _phone(text: str, _allowed: tuple[str, ...]) -> Iterator[Span]:
     for match in _PHONE_INTERNATIONAL.finditer(text):
-        digits = sum(char.isdigit() for char in match.group(0))
-        if 8 <= digits <= 15:
-            return True
-    return bool(_PHONE_NATIONAL.search(text))
+        digits = re.sub(r"[^0-9]", "", match.group(0)).removeprefix("00")
+        if (
+            8 <= len(digits) <= 15
+            and not _is_fiction(digits)
+            and not _is_placeholder_number(digits)
+        ):
+            yield match.span()
+    for match in _PHONE_NATIONAL.finditer(text):
+        digits = re.sub(r"[^0-9]", "", match.group(0))
+        if not _is_fiction("33" + digits[1:]) and not _is_placeholder_number(digits):
+            yield match.span()
+    for match in _PHONE_NORTH_AMERICA.finditer(text):
+        digits = re.sub(r"[^0-9]", "", match.group(0))
+        if not _is_fiction("1" + digits) and not _is_placeholder_number(digits):
+            yield match.span()
 
 
-def _url(text: str, allowed_domains: Iterable[str]) -> bool:
-    domains = tuple(allowed_domains) + RESERVED_DOMAINS
+def _url(text: str, allowed: tuple[str, ...]) -> Iterator[Span]:
+    domains = allowed + RESERVED_DOMAINS
     for match in _URL.finditer(text):
+        # Superscript digits are word characters, as in a footnote mark after a host.
         host = match.group(2).lower().rstrip(".")
+        while host and host[-1].isdigit() and not host[-1].isdecimal():
+            host = host[:-1]
         if not host:
             continue  # A template such as http://{host}/, or a file:/// URL.
         address = _parse_ip(host)
         if address is not None:
             # Private addresses are reported by their own category.
-            if not _is_private(address) and _is_personal_public(address):
-                return True
+            if not _in_any(address, PRIVATE_NETWORKS) and _is_personal_public(address):
+                yield match.span()
             continue
         if host.startswith("[") or "." not in host:
             continue  # Not an address, or a single label such as http://supervisor/.
         if not _domain_allowed(host, domains):
+            yield match.span()
+
+
+def _home_path(text: str, _allowed: tuple[str, ...]) -> Iterator[Span]:
+    for match in _HOME_PATH.finditer(text):
+        name = match.group(1).lower()
+        if name not in HOME_DIRECTORY_PLACEHOLDERS and name.strip("."):
+            yield match.span()
+
+
+def _ascending(sequence: str) -> bool:
+    """Return whether a run of five or more hex digits counts up, as in 12345."""
+    run = 1
+    for first, second in pairwise(sequence):
+        run = run + 1 if int(second, 16) == int(first, 16) + 1 else 1
+        if run >= 5:
             return True
     return False
 
 
-def _home_path(text: str) -> bool:
-    return any(
-        m.group(1).lower() not in HOME_DIRECTORY_PLACEHOLDERS for m in _HOME_PATH.finditer(text)
+def _is_placeholder_hex(digits: str) -> bool:
+    """Return whether hex digits look made up, like aa:bb:cc:dd:ee:01 or de:ad:be:ef:ca:fe."""
+    digits = digits.lower()
+    octets = [digits[i : i + 2] for i in range(0, len(digits) - 1, 2)]
+    return (
+        len(set(digits)) <= 2
+        or digits in PLACEHOLDER_HEX
+        or sum(octet[0] == octet[1] for octet in octets) >= 4
+        or any(_ascending(part) for part in (digits, digits[0::2], digits[1::2]))
+        or sum(word in digits for word in HEX_WORDS) >= 2
+        or re.search(r"(.)\1{5}", digits) is not None  # A constant such as a bit mask.
     )
 
 
-def _mac(text: str) -> bool:
-    found = [m.group(1) for m in _MAC.finditer(text)]
-    found += [m.group(1) for m in _MAC_DOTTED.finditer(text)]
-    found += [m.group(1) for m in _MAC_BARE.finditer(text)]
-    for mac in found:
-        digits = re.sub(r"[:.-]", "", mac.lower())
-        if _is_placeholder_hex(digits) or digits.startswith("00005e0053"):
-            continue  # Placeholder, or the RFC 7042 documentation range.
-        return True
-    return False
+def _is_byte_data(digits: str) -> bool:
+    """Return whether most groups are small values, as in protocol frames: 01:03:00:0a."""
+    octets = [digits[i : i + 2] for i in range(0, len(digits) - 1, 2)]
+    return sum(octet[0] == "0" for octet in octets) * 3 > len(octets) * 2
 
 
-def _device_id(text: str) -> bool:
-    return any(not _is_placeholder_hex(m.group(1)) for m in _EUI64.finditer(text))
+def _hex_addresses(text: str) -> Iterator[tuple[str, Span, str]]:
+    """Yield ("mac" or "device-id", span, digits) for separated hex addresses."""
+    for match in _HEX_RUN.finditer(text):
+        run, base = match.group(0), match.start()
+        separators = run[2::3]
+        count = len(run) // 3 + 1
+        groups = [run[3 * i : 3 * i + 2] for i in range(count)]
+        start = 0
+        while start < count - 1:
+            end = start
+            while end < count - 1 and separators[end] == separators[start]:
+                end += 1
+            size = end - start + 1
+            span = (base + 3 * start, base + 3 * end + 2)
+            if size == 6:
+                yield "mac", span, "".join(groups[start : end + 1])
+            elif size == 8 and separators[start] == ":":
+                yield "device-id", span, "".join(groups[start : end + 1])
+            start = end
+
+
+def _real_hex(digits: str) -> bool:
+    return not _is_placeholder_hex(digits) and not _is_byte_data(digits)
+
+
+def _mac(text: str, _allowed: tuple[str, ...]) -> Iterator[Span]:
+    for kind, span, digits in _hex_addresses(text):
+        if kind == "mac" and _real_hex(digits) and not digits.lower().startswith("00005e0053"):
+            yield span  # 00:00:5e:00:53 is the RFC 7042 documentation range.
+    for pattern in (_MAC_DOTTED, _MAC_BARE):
+        for match in pattern.finditer(text):
+            digits = match.group(1).replace(".", "")
+            if _real_hex(digits) and not digits.lower().startswith("00005e0053"):
+                yield match.span(1)
+
+
+def _device_id(text: str, _allowed: tuple[str, ...]) -> Iterator[Span]:
+    for kind, span, digits in _hex_addresses(text):
+        if kind == "device-id" and _real_hex(digits):
+            yield span
+    for pattern in (_EUI64, _EUI64_BARE):
+        for match in pattern.finditer(text):
+            if _real_hex(match.group(1)):
+                yield match.span(1)
 
 
 def _real_coordinate(value: str) -> bool:
     return value not in PLACEHOLDER_COORDINATES and float(value) != 0
 
 
-def _coordinates(text: str) -> bool:
-    if any(_real_coordinate(m.group(1)) for m in _COORDINATE.finditer(text)):
-        return True
-    for match in _COORDINATE_PAIR.finditer(text):
-        latitude, longitude = match.groups()
-        in_range = abs(float(latitude)) <= 90 and abs(float(longitude)) <= 180
-        if in_range and (_real_coordinate(latitude) or _real_coordinate(longitude)):
-            return True
-    return False
+def _is_location(first: str, second: str) -> bool:
+    x, y = abs(float(first)), abs(float(second))
+    if x < 1 and y < 1:
+        return False  # Colors, ratios and offsets, not a place near 0, 0.
+    in_range = (x <= 90 and y <= 180) or (x <= 180 and y <= 90)  # GeoJSON writes lon, lat.
+    return in_range and (_real_coordinate(first) or _real_coordinate(second))
+
+
+def _coordinates(text: str, _allowed: tuple[str, ...]) -> Iterator[Span]:
+    for match in _COORDINATE.finditer(text):
+        if _real_coordinate(match.group(1)):
+            yield match.span(1)
+    for pattern in (_COORDINATE_PAIR, _COORDINATE_TEXT, _GEO_URI):
+        for match in pattern.finditer(text):
+            if _SVG_TRANSFORM.search(text, max(0, match.start() - 16), match.start()):
+                continue  # An SVG transform such as translate(12.34567, 45.67891).
+            if _is_location(match.group(1), match.group(2)):
+                yield match.span()
+
+
+_FINDERS: dict[str, Callable[[str, tuple[str, ...]], Iterator[Span]]] = {
+    "private-ip": _private_ip,
+    "public-ip": _public_ip,
+    "email": _email,
+    "phone": _phone,
+    "url": _url,
+    "home-path": _home_path,
+    "mac": _mac,
+    "device-id": _device_id,
+    "coordinates": _coordinates,
+}
+_ORDER = {name: index for index, name in enumerate((DENYLIST, *_FINDERS))}
+
+
+def generic_spans(text: str, allowed_domains: Iterable[str]) -> Iterator[tuple[str, Span]]:
+    """Yield the category and position of each piece of personal data in a text."""
+    allowed = tuple(allowed_domains)
+    for name, finder in _FINDERS.items():
+        for span in finder(text, allowed):
+            yield name, span
 
 
 def generic_findings(text: str, allowed_domains: Iterable[str]) -> list[str]:
     """Return the categories of personal data found in a piece of text."""
-    checks = {
-        "private-ip": _private_ip,
-        "public-ip": _public_ip,
-        "email": lambda value: _email(value, allowed_domains),
-        "phone": _phone,
-        "url": lambda value: _url(value, allowed_domains),
-        "home-path": _home_path,
-        "mac": _mac,
-        "device-id": _device_id,
-        "coordinates": _coordinates,
-    }
-    return [name for name, check in checks.items() if check(text)]
+    found = {name for name, _ in generic_spans(text, allowed_domains)}
+    return [name for name in _FINDERS if name in found]
 
 
-# Letters that Unicode does not decompose into a base letter and an accent.
-_FOLD = str.maketrans(
-    {
-        "\u00f8": "o",  # o with stroke
-        "\u00e6": "ae",
-        "\u0153": "oe",
-        "\u0142": "l",  # l with stroke
-        "\u0111": "d",  # d with stroke
-        "\u00f0": "d",  # eth
-        "\u00fe": "th",  # thorn
-        "\u0131": "i",  # dotless i
-        "\u2018": "'",
-        "\u2019": "'",
-        "\u02bc": "'",
-    }
-)
+@dataclass(frozen=True)
+class Finding:
+    """Something found in a text: a denylisted term or a generic category."""
 
-
-def normalize(text: str) -> str:
-    """Fold case, accents and special letters so that spelling variants match."""
-    if text.isascii():
-        return text.lower()
-    decomposed = unicodedata.normalize("NFKD", text)
-    stripped = "".join(char for char in decomposed if not unicodedata.combining(char))
-    return stripped.casefold().translate(_FOLD)
-
-
-def _alternation(patterns: Iterable[str]) -> re.Pattern[str] | None:
-    """Compile word patterns into one that matches any of them as whole words."""
-    if not patterns:
-        return None
-    alternation = "|".join(sorted(patterns, key=len, reverse=True))
-    return re.compile(rf"(?<![^\W_])(?:{alternation})(?![^\W_])")
-
-
-class Denylist:
-    """Terms that must never appear.
-
-    Matching ignores case and accents, respects word boundaries, and lets
-    the words of a term be separated by any punctuation, underscores or line
-    breaks, so that "first last" also matches "first_last" and "First-Last".
-    """
-
-    def __init__(self, raw: str) -> None:
-        terms = []
-        for line in raw.splitlines():
-            term = line.strip()
-            if term and not term.startswith("#"):
-                terms.append(term)
-        self.terms = terms
-        patterns: dict[str, int] = {}
-        for term in terms:
-            words = [word for word in re.split(r"[\W_]+", normalize(term)) if word]
-            if words:
-                patterns[r"[\W_]+".join(map(re.escape, words))] = sum(map(len, words))
-        self._pattern = _alternation(patterns)
-        # Random bytes spell short words by chance, so in binary content short
-        # terms only count inside phrases (see matches_binary).
-        self._long_pattern = _alternation(
-            {pattern: size for pattern, size in patterns.items() if size >= MIN_BINARY_TERM}
-        )
-
-    def __bool__(self) -> bool:
-        return self._pattern is not None
-
-    def matches(self, text: str) -> bool:
-        """Return whether a piece of text contains a term."""
-        return bool(self._pattern and self._pattern.search(normalize(text)))
-
-    def matching_lines(self, text: str) -> list[int]:
-        """Return the line numbers where a term starts, terms spanning lines included."""
-        if not self._pattern:
-            return []
-        folded = normalize(text)
-        lines: list[int] = []
-        line = 1
-        position = 0
-        for match in self._pattern.finditer(folded):
-            line += folded.count("\n", position, match.start())
-            position = match.start()
-            if not lines or lines[-1] != line:
-                lines.append(line)
-        return lines
-
-    def matches_binary(self, data: bytes) -> bool:
-        """Return whether the readable strings of binary content contain a term.
-
-        Terms of at least MIN_BINARY_TERM letters count anywhere in a string.
-        Shorter ones count only in a phrase: a part of a string, between
-        symbols, with several words and only letters, digits, spaces and
-        common punctuation, such as a title or an author in image metadata.
-        """
-        if not self._pattern:
-            return False
-        runs = [run.decode("utf-8", errors="replace") for run in _STRING_RUN.findall(data)]
-        runs += [run.decode("utf-16-le") for run in _UTF16_RUN.findall(data)]
-        for run in runs:
-            folded = normalize(run)
-            if self._long_pattern and self._long_pattern.search(folded):
-                return True
-            for part in _NOT_PHRASE.split(folded):
-                phrase = part.strip()
-                is_phrase = len(phrase) >= MIN_STRING_LENGTH and " " in phrase
-                if is_phrase and self._pattern.search(phrase):
-                    return True
-        return False
-
-    def redact_path(self, path: str) -> str:
-        """Return a path with the parts that contain a term replaced."""
-        parts = ["[redacted]" if self.matches(part) else part for part in PurePosixPath(path).parts]
-        redacted = "/".join(parts)
-        return "[redacted path]" if self.matches(redacted) else redacted
-
-    def mask_values(self) -> set[str]:
-        """Return the spellings of each term that the runner should mask in logs."""
-        values = set()
-        for term in self.terms:
-            for base in (term, normalize(term)):
-                for cased in (base, base.lower(), base.upper(), base.title()):
-                    for separator in (" ", "_", "-", "."):
-                        values.add(cased.replace(" ", separator))
-        return {value for value in values if len(value) >= 3}
+    first: int
+    last: int
+    category: str
 
 
 def is_license_file(path: str) -> bool:
@@ -513,12 +623,30 @@ def is_license_file(path: str) -> bool:
     return bool(_LICENSE_FILE.match(PurePosixPath(path).name))
 
 
-def _is_utf8(data: bytes) -> bool:
-    try:
-        data.decode("utf-8")
-    except UnicodeDecodeError:
-        return False
-    return True
+def is_lfs_pointer(data: bytes) -> bool:
+    """Return whether content is a Git LFS pointer, whose real content is stored elsewhere."""
+    return len(data) < 1024 and data.startswith(LFS_POINTER)
+
+
+def _text(data: bytes) -> str | None:
+    """Return the text of a file, or None for binary content and documents.
+
+    A PDF file can be plain ASCII, but it writes its text fields with escapes
+    that only the metadata reader decodes.
+    """
+    return None if data.startswith(b"%PDF") else decode_text(data)
+
+
+def _regions(added: Iterable[int], count: int, context: int) -> list[tuple[int, int]]:
+    """Return the line ranges around the added lines, merged when they overlap."""
+    regions: list[tuple[int, int]] = []
+    for number in sorted(n for n in added if 1 <= n <= count):
+        start, end = max(1, number - context), min(count, number + context)
+        if regions and start <= regions[-1][1] + 1:
+            regions[-1] = (regions[-1][0], end)
+        else:
+            regions.append((start, end))
+    return regions
 
 
 class PrivacyCheck:
@@ -540,61 +668,96 @@ class PrivacyCheck:
         self._current: dict[str, list[str]] = {}
 
     def _generic_applies(self, path: str) -> bool:
-        return not matches_any(path, self.exclude) and not is_license_file(path)
+        shown = display_path(path)
+        return not matches_any(shown, self.exclude) and not is_license_file(shown)
 
-    def _location(self, path: str) -> tuple[str, str | None]:
-        """Return the path to show and the path to annotate, hiding denylisted parts."""
-        if self.denylist.matches(path):
-            return self.denylist.redact_path(path), None
-        return path, path
+    def findings(self, text: str, generic: bool) -> list[Finding]:
+        """Return what a text holds, by line, after the `ci-allow` comments."""
+        found: dict[tuple[int, str], Finding] = {}
+        for first, last in self.denylist.spans(text):
+            found.setdefault((first, DENYLIST), Finding(first, last, DENYLIST))
+        if generic:
+            lines = split_lines(text)
+            starts = [0, *(match.end() for match in re.finditer("\n", text))]
+            for category, (start, end) in generic_spans(text, self.allowed_domains):
+                first = bisect_right(starts, start)
+                last = bisect_right(starts, max(start, end - 1))
+                if any(allowed_by_pragma(line, category) for line in lines[first - 1 : last]):
+                    continue
+                found.setdefault((first, category), Finding(first, last, category))
+        return sorted(found.values(), key=lambda f: (f.first, _ORDER[f.category]))
 
-    def _personal_data(self, line: str) -> list[str]:
-        return [
-            category
-            for category in generic_findings(line, self.allowed_domains)
-            if not allowed_by_pragma(line, category)
-        ]
+    def _categories(self, text: str) -> list[str]:
+        """Return the generic categories of a message, after its `ci-allow` comments."""
+        found = {f.category for f in self.findings(text, generic=True)} - {DENYLIST}
+        return sorted(found, key=_ORDER.__getitem__)
 
     def check_files(self, paths: Iterable[str]) -> None:
         """Check file paths, symbolic link targets and file contents."""
         for path in paths:
-            shown, annotated = self._location(path)
+            shown, annotated = location(self.denylist, display_path(path))
             if annotated is None:
                 self.reporter.error(f"{shown}: the file path contains a denylisted term.")
             full = self.root / path
             if full.is_symlink():
                 self._check_symlink(path, str(full.readlink()))
                 continue
+            if full.is_dir():
+                continue  # A submodule, whose URL is checked in .gitmodules.
             data = read_bytes(full, MAX_SCAN_BYTES)
             if data is None:
                 if full.exists():
                     self.reporter.warning(
                         f"{shown}: larger than {MAX_SCAN_BYTES} bytes, not scanned."
                     )
+                else:
+                    self.reporter.error(f"{shown}: tracked but missing from the checkout.")
                 continue
-            text = decode_text(data)
+            if is_lfs_pointer(data):
+                self.reporter.error(
+                    f"{shown}: stored with Git LFS, so its content cannot be checked. "
+                    "Commit the file to the repository itself.",
+                    annotated,
+                )
+                continue
+            text = _text(data)
+            generic = self._generic_applies(path)
             if text is None:
-                if self.denylist.matches_binary(data):
-                    self.reporter.error(
-                        f"{shown}: binary content contains a denylisted term.", annotated
-                    )
+                self._check_binary(shown, annotated, data, generic)
                 continue
-            for number in self.denylist.matching_lines(text):
-                self.reporter.error(f"{shown}:{number}: denylisted term.", annotated, number)
-            # Most files have nothing; looking at the whole text first is faster.
-            if not self._generic_applies(path) or not generic_findings(text, self.allowed_domains):
-                continue
-            for number, line in enumerate(split_lines(text), start=1):
-                for category in self._personal_data(line):
-                    self.reporter.error(
-                        f"{shown}:{number}: possible personal data ({category}). Remove it, or "
-                        f"add `ci-allow: {category}` to the line if it is not personal.",
-                        annotated,
-                        number,
-                    )
+            for finding in self.findings(text, generic):
+                number = finding.first
+                if finding.category == DENYLIST:
+                    self.reporter.error(f"{shown}:{number}: denylisted term.", annotated, number)
+                    continue
+                self.reporter.error(
+                    f"{shown}:{number}: possible personal data ({finding.category}). Remove "
+                    f"it, or add `ci-allow: {finding.category}` to the line if it is not "
+                    "personal.",
+                    annotated,
+                    number,
+                )
+
+    def _check_binary(self, where: str, annotated: str | None, data: bytes, generic: bool) -> None:
+        metadata = read_metadata(data)
+        if self.denylist.matches_binary(data) or any(map(self.denylist.matches, metadata.texts)):
+            self.reporter.error(f"{where}: binary content contains a denylisted term.", annotated)
+        if not generic:
+            return
+        found = {"coordinates"} if metadata.location else set()
+        for text in metadata.texts:
+            found.update(generic_findings(text, self.allowed_domains))
+        for category in METADATA_CATEGORIES:
+            if category in found:
+                self.reporter.error(
+                    f"{where}: the file metadata may contain personal data ({category}). "
+                    "Remove the metadata, for example by exporting the file again without it.",
+                    annotated,
+                )
 
     def _check_symlink(self, path: str, target: str) -> None:
-        shown, annotated = self._location(path)
+        shown, annotated = location(self.denylist, display_path(path))
+        target = display_path(target)
         if self.denylist.matches(target):
             self.reporter.error(f"{shown}: the link target contains a denylisted term.", annotated)
         if self._generic_applies(path):
@@ -614,63 +777,66 @@ class PrivacyCheck:
     def check_changes(self, written: Iterable[Change], exempt: set[str]) -> None:
         """Check the files written by new commits, including content removed later.
 
-        Lines that are still in the file at the same place were already
-        checked with the files, so they are not reported twice. Commits in
+        Findings that are still in the file at the same place were already
+        reported with the files, so they are not reported twice. Commits in
         `exempt` skip the generic patterns but not the denylist.
         """
-        written = list(written)
-        blobs = (change.blob for change in written if change.blob)
-        contents = blob_contents(self.root, blobs, MAX_SCAN_BYTES)
+        written = [change for change in written if change.mode != GITLINK_MODE]
+        contents = blob_contents(self.root, (c.blob for c in written if c.blob), MAX_SCAN_BYTES)
         reported_paths = set()
         for change in written:
+            if not change.blob:
+                continue  # A deletion, which adds nothing.
             short = change.sha[:12]
-            shown, _ = self._location(change.path)
-            if self.denylist.matches(change.path) and (short, change.path) not in reported_paths:
+            shown, _ = location(self.denylist, display_path(change.path))
+            if shown != display_path(change.path) and (short, change.path) not in reported_paths:
                 reported_paths.add((short, change.path))
                 self.reporter.error(f"Commit {short}: a file path contains a denylisted term.")
-            if not change.blob:
+            where = f"Commit {short}: {shown}"
+            if change.blob not in contents:
+                self.reporter.error(f"{where}: the content could not be read from the repository.")
                 continue
-            data = contents.get(change.blob)
+            data = contents[change.blob]
             if data is None:
-                self.reporter.warning(
-                    f"Commit {short}: {shown}: larger than {MAX_SCAN_BYTES} bytes, not scanned."
-                )
+                self.reporter.warning(f"{where}: larger than {MAX_SCAN_BYTES} bytes, not scanned.")
                 continue
-            text = decode_text(data)
-            if text is None:
-                if self.denylist.matches_binary(data):
-                    self.reporter.error(
-                        f"Commit {short}: {shown}: binary content contains a denylisted term."
-                    )
-                continue
-            added: Iterable[tuple[int, str]] = change.added
-            if not _is_utf8(data):
-                # A UTF-16 or UTF-32 diff cannot be read line by line.
-                added = enumerate(split_lines(text), start=1)
-            generic = change.sha not in exempt and self._generic_applies(change.path)
-            self._check_added(short, change.path, shown, added, generic)
-
-    def _check_added(
-        self, short: str, path: str, shown: str, added: Iterable[tuple[int, str]], generic: bool
-    ) -> None:
-        current = self._current_lines(path)
-        for number, line in added:
-            if 0 < number <= len(current) and current[number - 1] == line:
-                continue
-            where = f"Commit {short}: {shown}:{number}"
-            if self.denylist.matches(line):
-                self.reporter.error(f"{where}: an added line has a denylisted term.")
-            if "gitleaks:allow" in line:
-                self.reporter.warning(
-                    f"{where}: gitleaks:allow hides the line from the secret scan. "
-                    "Reviewers must confirm that it holds no secret."
-                )
-            if not generic:
-                continue
-            for category in self._personal_data(line):
+            if is_lfs_pointer(data):
                 self.reporter.error(
-                    f"{where}: an added line may contain personal data ({category}), "
-                    "even if a later commit removed it."
+                    f"{where}: stored with Git LFS, so its content cannot be checked."
+                )
+                continue
+            generic = change.sha not in exempt and self._generic_applies(change.path)
+            text = _text(data)
+            if text is None:
+                self._check_binary(where, None, data, generic)
+                continue
+            self._check_added(where, change, split_lines(text), generic)
+
+    def _check_added(self, where: str, change: Change, lines: list[str], generic: bool) -> None:
+        added = change.added
+        current = self._current_lines(change.path)
+        context = max(CONTEXT_LINES, self.denylist.longest_term)
+        regions = [(1, len(lines))] if added is None else _regions(added, len(lines), context)
+        for start, end in regions:
+            block = "\n".join(lines[start - 1 : end])
+            for finding in self.findings(block, generic):
+                span = range(finding.first + start - 1, finding.last + start)
+                if added is not None and not any(number in added for number in span):
+                    continue
+                if all(0 < n <= len(current) and current[n - 1] == lines[n - 1] for n in span):
+                    continue
+                if finding.category == DENYLIST:
+                    self.reporter.error(f"{where}:{span[0]}: an added line has a denylisted term.")
+                else:
+                    self.reporter.error(
+                        f"{where}:{span[0]}: an added line may contain personal data "
+                        f"({finding.category}), even if a later commit removed it."
+                    )
+        for number in range(1, len(lines) + 1) if added is None else sorted(added):
+            if 0 < number <= len(lines) and "gitleaks:allow" in lines[number - 1]:
+                self.reporter.warning(
+                    f"{where}:{number}: gitleaks:allow hides the line from the secret scan. "
+                    "Reviewers must confirm that it holds no secret."
                 )
 
     def check_identities(self, history: Iterable[Commit]) -> None:
@@ -701,7 +867,7 @@ class PrivacyCheck:
         for commit in new_commits:
             if commit.sha in exempt:
                 continue
-            for category in generic_findings(commit.message, self.allowed_domains):
+            for category in self._categories(commit.message):
                 self.reporter.error(
                     f"Commit {commit.short}: message may contain personal data ({category})."
                 )
@@ -717,7 +883,7 @@ class PrivacyCheck:
             # Dependency bots quote upstream release notes in the body.
             texts.append(("body", pr.body))
         for name, value in texts:
-            for category in generic_findings(value, self.allowed_domains):
+            for category in self._categories(value):
                 self.reporter.error(f"Pull request {name} may contain personal data ({category}).")
 
 
@@ -725,6 +891,29 @@ def mask_terms(denylist: Denylist) -> Iterator[str]:
     """Yield the workflow commands that mask each spelling of each term."""
     for value in sorted(denylist.mask_values()):
         yield f"::add-mask::{value}"
+
+
+def check_denylist_sources(sources: list[str], pr: PullRequest | None, reporter: Reporter) -> None:
+    """Fail when no denylist holds a term, and warn about empty ones.
+
+    Only counts are printed: the names of the secrets may hint at their content.
+    """
+    empty = sum(1 for raw in sources if not Denylist(raw))
+    if empty < len(sources):
+        if empty:
+            reporter.warning(f"{empty} of the {len(sources)} denylist secrets are empty.")
+    elif pr is not None and pr.from_fork:
+        reporter.error(
+            "The denylist secrets are not available to pull requests from forks. A "
+            "maintainer must push the branch to this repository so that the denylist runs."
+        )
+    else:
+        reporter.error(
+            "No denylist found. Create at least one organization secret whose name starts "
+            "with PRIVACY_DENYLIST, for Actions and for Dependabot, with access to this "
+            "repository, and call the workflow with `secrets: inherit`; or set "
+            "require-denylist to false."
+        )
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -737,33 +926,29 @@ def main(argv: list[str] | None = None) -> int:
         "--require-denylist",
         default="true",
         choices=("true", "false"),
-        help="fail when PRIVACY_DENYLIST is empty",
+        help="fail when no denylist secret holds a term",
     )
     parser.add_argument(
         "--mask-only", action="store_true", help="only mask the denylisted terms in the job log"
     )
     args = parser.parse_args(argv)
 
-    denylist = Denylist(os.environ.get("PRIVACY_DENYLIST", ""))
+    try:
+        sources = denylist_sources(os.environ)
+    except CheckError as err:
+        return fail(str(err))
+    denylist = Denylist("\n".join(sources))
     for command in mask_terms(denylist):
         print(command)
     if args.mask_only:
         return 0
 
     reporter = Reporter("Privacy")
+    print(f"Privacy: {len(sources)} denylist secret(s) read.")
     event = load_event()
     pr = pull_request(event)
-    if not denylist and args.require_denylist == "true":
-        if pr is not None and pr.from_fork:
-            reporter.error(
-                "PRIVACY_DENYLIST is not available to pull requests from forks. A maintainer "
-                "must push the branch to this repository so that the denylist runs."
-            )
-        else:
-            reporter.error(
-                "PRIVACY_DENYLIST is empty. Pass the organization secret to the workflow, "
-                "or set require-denylist to false."
-            )
+    if args.require_denylist == "true":
+        check_denylist_sources(sources, pr, reporter)
 
     try:
         require_full_history(args.root)

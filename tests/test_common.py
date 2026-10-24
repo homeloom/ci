@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import codecs
+import os
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -37,6 +39,15 @@ def test_read_helpers_skip_large_files_and_symlinks(repo: Repo) -> None:
 
 def test_decode_text() -> None:
     assert _common.decode_text(b"caf\xc3\xa9") == "café"
+    assert _common.decode_text(b"\xef\xbb\xbfhi") == "hi"
+    # Bytes that are not UTF-8 are read as Windows-1252, as spreadsheets save them.
+    assert _common.decode_text("Hélène;Noël\n".encode("cp1252")) == "Hélène;Noël\n"
+    assert _common.decode_text(b"caf\xc3\xa9 and caf\xe9 \x81") == "café and café \x81"
+    # UTF-16 without a byte order mark, as some Windows tools write it.
+    assert _common.decode_text("host: é\r\n".encode("utf-16-le")) == "host: é\r\n"
+    assert _common.decode_text("host: é\r\n".encode("utf-16-be")) == "host: é\r\n"
+    assert _common.decode_text("\x01\x02\x03\x04\x05".encode("utf-16-le")) is None
+    assert _common.decode_text(b"a\0") is None
     assert _common.decode_text(b"\0\x01") is None
     assert _common.decode_text(codecs.BOM_UTF16_LE + "hé\n".encode("utf-16-le")) == "hé\n"
     assert _common.decode_text(codecs.BOM_UTF16_BE + "hé".encode("utf-16-be")) == "hé"
@@ -105,6 +116,33 @@ def test_require_full_history(repo: Repo, tmp_path: Path) -> None:
         _common.require_full_history(clone)
 
 
+@pytest.mark.parametrize("encoding", ["ISO-8859-1", "x-unknown"])
+def test_commits_read_raw_objects(repo: Repo, encoding: str) -> None:
+    base = repo.commit()
+    tree = repo.git("write-tree").strip()
+    raw = (
+        f"tree {tree}\nparent {base}\n"
+        "author Zo\xe9 <1+z@users.noreply.github.com> 1700000000 +0000\n"
+        "committer Zo\xe9 <1+z@users.noreply.github.com> 1700000000 +0000\n"
+        f"encoding {encoding}\n\nfix: ok\0hidden 10.0.0.2\n"
+    ).encode("latin-1")
+    sha = (
+        subprocess.run(
+            ["git", "hash-object", "-t", "commit", "-w", "--literally", "--stdin"],
+            cwd=repo.root,
+            input=raw,
+            capture_output=True,
+            check=True,
+        )
+        .stdout.decode()
+        .strip()
+    )
+    [commit] = _common.commits(repo.root, [f"{base}..{sha}"])
+    assert commit.author_name == "Zo\N{LATIN SMALL LETTER E WITH ACUTE}"
+    assert commit.message == "fix: ok\0hidden 10.0.0.2"
+    assert _common._identity(b"no address") == (b"no address", b"")
+
+
 def test_commits(repo: Repo) -> None:
     repo.commit(
         "feat: first\n\nBody line.\x1e with a separator", name="Alice", email="a@example.com"
@@ -131,50 +169,59 @@ def test_dependency_bot_commits(repo: Repo) -> None:
     assert _common.dependency_bot_commits(pr_event(human, bot), new) == set()
 
 
+def changes_of(repo: Repo, base: str) -> dict[tuple[str, str], _common.Change]:
+    return {(c.sha, c.path): c for c in _common.changes(repo.root, [f"{base}..HEAD"])}
+
+
 def test_changes(repo: Repo) -> None:
     base = repo.commit()
     repo.write("a.txt", "one\ntwo\n")
     repo.write("b.bin", b"\0\0")
     first = repo.commit()
     repo.write("a.txt", "one\n++ plus\nthree\n")
-    repo.write("odd name é.txt", "x\n")
+    repo.write("odd name \N{LATIN SMALL LETTER E WITH ACUTE}.txt", "x\n")
     repo.write("tab\there.txt", "y\n")
     repo.write("empty.txt", "")
     second = repo.commit()
-    repo.git("rm", "--quiet", "odd name é.txt")
+    repo.git("rm", "--quiet", "odd name \N{LATIN SMALL LETTER E WITH ACUTE}.txt")
     third = repo.commit()
 
-    found = {(c.sha, c.path): c for c in _common.changes(repo.root, [f"{base}..HEAD"])}
+    found = changes_of(repo, base)
+    odd = "odd name \N{LATIN SMALL LETTER E WITH ACUTE}.txt"
     assert set(found) == {
-        (third, "odd name é.txt"),
+        (third, odd),
         (second, "a.txt"),
-        (second, "odd name é.txt"),
+        (second, odd),
         (second, "tab\there.txt"),
         (second, "empty.txt"),
         (first, "a.txt"),
         (first, "b.bin"),
     }
-    assert found[(second, "a.txt")].added == ((2, "++ plus"), (3, "three"))
-    assert found[(first, "a.txt")].added == ((1, "one"), (2, "two"))
-    assert found[(second, "tab\there.txt")].added == ((1, "y"),)
-    assert found[(third, "odd name é.txt")].blob == ""
-    assert found[(second, "empty.txt")].added == ()
+    assert found[(second, "a.txt")].added == {2, 3}
+    assert found[(first, "a.txt")].added == {1, 2}
+    assert found[(first, "a.txt")].mode == "100644"
+    assert found[(second, "tab\there.txt")].added == {1}
+    assert found[(third, odd)].blob == ""
+    assert found[(second, "empty.txt")].added == set()
     assert found[(second, "empty.txt")].blob
-    contents = _common.blob_contents(repo.root, [found[(first, "b.bin")].blob, "f" * 40], 10)
-    assert contents == {found[(first, "b.bin")].blob: b"\0\0", "f" * 40: None}
+    # Git does not diff binary content: every line of it counts as added.
+    assert found[(first, "b.bin")].added is None
+    binary = found[(first, "b.bin")].blob
+    assert _common.blob_contents(repo.root, [binary, "f" * 40], 10) == {binary: b"\0\0"}
     assert _common.blob_contents(repo.root, [found[(second, "a.txt")].blob], 1) == {
         found[(second, "a.txt")].blob: None
     }
     assert _common.blob_contents(repo.root, [], 10) == {}
 
 
-def test_changes_ignore_attributes_and_textconv(repo: Repo) -> None:
+def test_changes_treat_files_git_will_not_diff_as_new(repo: Repo) -> None:
     base = repo.commit()
     repo.write(".gitattributes", "*.snap -diff\n")
     repo.write("data.snap", "secret line\n")
-    head = repo.commit()
-    found = {c.path: c.added for c in _common.changes(repo.root, [f"{base}..{head}"])}
-    assert found["data.snap"] == ((1, "secret line"),)
+    repo.commit()
+    found = {path: c.added for (_, path), c in changes_of(repo, base).items()}
+    assert found["data.snap"] is None
+    assert found[".gitattributes"] == {1}
 
 
 def test_changes_of_merges_keep_only_new_lines(repo: Repo) -> None:
@@ -191,12 +238,58 @@ def test_changes_of_merges_keep_only_new_lines(repo: Repo) -> None:
     repo.git("add", "--all")
     merge = repo.commit("Merge side")
     found = [c for c in _common.changes(repo.root, [f"{base}..HEAD"]) if c.sha == merge]
-    assert [(c.path, c.added) for c in found] == [("b.txt", ((2, "resolution"),))]
+    assert [(c.path, c.added) for c in found] == [("b.txt", {2})]
+
+
+def test_changes_keep_carriage_returns_inside_lines(repo: Repo) -> None:
+    base = repo.commit()
+    # Classic Mac line endings, a progress bar, and a record separator after
+    # a carriage return, which must not end the file early.
+    repo.write("devices.csv", b"name,ip\rnas,10.0.0.2\r")
+    repo.write("install.log", b"progress 10%\r\x1edone\nhost 10.0.0.2\nowner x\n")
+    head = repo.commit()
+    found = changes_of(repo, base)
+    assert found[(head, "devices.csv")].added == {1}
+    assert found[(head, "install.log")].added == {1, 2, 3}
+
+
+def test_changes_and_tracked_files_keep_odd_file_names(repo: Repo) -> None:
+    base = repo.commit()
+    carriage = "notes\r.txt"
+    latin = os.fsdecode(b"caf\xe9.txt")
+    repo.write(carriage, "x\n")
+    (repo.root / latin).write_bytes(b"y\n")
+    head = repo.commit()
+    assert _common.tracked_files(repo.root) == sorted([carriage, latin])
+    assert {path for _, path in changes_of(repo, base)} == {carriage, latin}
+    assert (repo.root / carriage).read_bytes() == b"x\n"
+    assert _common.display_path(latin) == "caf\N{LATIN SMALL LETTER E WITH ACUTE}.txt"
+    assert head
+
+
+def test_changes_mark_submodules(repo: Repo, tmp_path: Path) -> None:
+    other = Repo(tmp_path / "other")
+    other.commit()
+    base = repo.commit()
+    repo.git(
+        "-c", "protocol.file.allow=always", "submodule", "add", "--quiet", str(other.root), "sub"
+    )
+    head = repo.commit()
+    found = changes_of(repo, base)
+    assert found[(head, "sub")].mode == _common.GITLINK_MODE
+    assert found[(head, ".gitmodules")].added == {1, 2, 3}
+
+
+def test_changes_report_git_errors(repo: Repo) -> None:
+    repo.commit()
+    with pytest.raises(subprocess.CalledProcessError):
+        _common.changes(repo.root, ["no-such-revision"])
 
 
 def test_unquote() -> None:
     assert (
-        _common._unquote(r"tab\there \"q\" back\\slash \303\251") == 'tab\there "q" back\\slash é'
+        _common._unquote(rb"tab\there \"q\" back\\slash \303\251 \r")
+        == b'tab\there "q" back\\slash \xc3\xa9 \r'
     )
 
 
@@ -213,6 +306,14 @@ def test_reporter(capsys: pytest.CaptureFixture[str]) -> None:
     assert "Demo: 2 problem(s) found." in out
 
     assert Reporter("Clean").finish() == 0
+
+
+def test_reporter_prints_file_names_that_are_not_utf8(capsys: pytest.CaptureFixture[str]) -> None:
+    reporter = Reporter("Demo")
+    name = os.fsdecode(b"caf\xe9.txt")
+    reporter.error(f"{name}: bad", name, 1)
+    reporter.warning(name)
+    assert "::error file=café.txt,line=1::café.txt: bad" in capsys.readouterr().out
 
 
 def test_fail(capsys: pytest.CaptureFixture[str]) -> None:

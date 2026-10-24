@@ -1,0 +1,270 @@
+"""Tests for matching denylisted terms. Every term here is invented."""
+
+from __future__ import annotations
+
+import random
+import time
+
+import pytest
+
+from ci_checks._common import CheckError
+from ci_checks.denylist import Denylist, denylist_sources, location, normalize, unescape
+
+TERMS = """\ufeff# Invented terms only.
+
+Bluefinch
+rue des Lilas
+Pré-Vert
+bus 917
+Ren
+Chloé
+Hélène Dupont
+Ørsted Lane
+Straße Nord
+Bedeline
+  Bluefinch
+"""
+DENYLIST = Denylist(TERMS)
+# Short first names, which random bytes spell by chance.
+SHORT_NAMES = "\n".join(
+    "Ugo Leo Eli Luna Max Mia Noa Zoe Tom Eva Lou Ana Ben Sam Kim Ivy Ada Ari Bo Jo".split()
+)
+
+
+def test_terms_skip_comments_blank_lines_and_duplicates() -> None:
+    assert DENYLIST.terms == [
+        "Bluefinch",
+        "rue des Lilas",
+        "Pré-Vert",
+        "bus 917",
+        "Ren",
+        "Chloé",
+        "Hélène Dupont",
+        "Ørsted Lane",
+        "Straße Nord",
+        "Bedeline",
+    ]
+    assert DENYLIST.longest_term == 3
+    assert DENYLIST
+    assert not Denylist("")
+    assert not Denylist("# only a comment\n\n   \n")
+    assert not Denylist("!!!\n--")
+    assert Denylist("!!!\n--").mask_values() == {"!!!"}
+    assert Denylist("\ufeffBluefinch").matches("bluefinch")
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        # Case, accents and letters without a decomposition, both ways.
+        "Hello BLUEFINCH!",
+        "bluefínch with an accent",
+        "pre vert",
+        "PRÉ VERT",
+        "chloe",
+        "CHLOÉ",
+        "helene dupont",
+        "orsted_lane",
+        "ØRSTED LANE",
+        "strasse nord",
+        "STRASSE-NORD",
+        # Words glued with underscores, hyphens, dots or nothing.
+        "rue_des_lilas",
+        "rue-des-lilas",
+        "RUE_DES-lilas",
+        "rue.des.lilas",
+        "ruedeslilas",
+        "pre_vert",
+        "prevert",
+        "bus_917",
+        "bus-917",
+        "bus917",
+        "HeleneDupont",
+        "helene.dupont@example.com",
+        # Several spaces, tabs and line breaks between the words.
+        "rue   des    lilas",
+        "Rue  des\tLilas",
+        "lives rue des\nLilas",
+        "lives rue des\r\nlilas",
+        "bus\n\n917",
+        "Hélène\n    Dupont",
+        # Inside identifiers, paths and URLs.
+        "sensor.bluefinch_door",
+        "https://zorb.example/rue-des-lilas",
+        "docs/Bluefinch/notes.md",
+        "getBluefinch()",
+        "BluefinchSensor",
+        # Invisible characters inside a word.
+        "Blue\N{SOFT HYPHEN}finch",
+        "Blue\N{ZERO WIDTH SPACE}finch",
+        "Chlo\N{ZERO WIDTH JOINER}é",
+        # Escapes, matched once decoded.
+        '"name": "Chlo\\u00e9"',
+        '"holder": "H\\u00e9l\\u00e8ne Dupont"',
+        "Chlo&eacute;",
+        "Chlo&#233;",
+        "Chlo&#xe9;",
+        "Chlo%C3%A9",
+        "q=rue%20des%20Lilas",
+        "b'Chlo\\xc3\\xa9'",
+        "\\U0001F600Bluefinch",
+        '"text": "First line.\\nBluefinch"',
+        "\\tBluefinch",
+        "Bluefinch\\u0027s",
+        "Bluefinch&amp;co",
+        # Backslashes that are path separators, not escapes.
+        "d:\\notes\\rue des lilas.txt",
+        '"path": "C:\\\\Users\\\\rue des lilas"',
+        "50%Bedeline",
+    ],
+)
+def test_matches(text: str) -> None:
+    assert DENYLIST.matches(text)
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "",
+        "bluefinches",
+        "superbluefinch",
+        "bluefinch2",
+        "prevertical",
+        "bus 9170",
+        "bus917x",
+        "rue des lilasx",
+        "Chlo",
+        "Renée",
+        # A word that an escape goes on with is another word.
+        "Ren\\u00e9e",
+        "ren&eacute;e",
+        "ren%C3%A9e",
+        "\\u00e9bluefinch",
+        "bluefinch%61",
+        "&eacute;bluefinch",
+        # Short terms are not split out of camel case names.
+        "isRen",
+    ],
+)
+def test_does_not_match(text: str) -> None:
+    assert not DENYLIST.matches(text)
+
+
+def test_empty_denylist_matches_nothing() -> None:
+    empty = Denylist("")
+    assert not empty.matches("anything")
+    assert not empty.matches_binary(b"anything")
+    assert empty.spans("anything") == []
+    assert empty.mask_values() == set()
+
+
+def test_spans_count_lines_and_terms_over_line_breaks() -> None:
+    denylist = Denylist("rue des Lilas")
+    text = "one\nwe live rue des\nLilas now\nrue des lilas, rue des lilas\n"
+    assert denylist.spans(text) == [(2, 3), (4, 4)]
+    assert denylist.spans(text.replace("\n", "\r\n")) == [(2, 3), (4, 4)]
+    # Escapes are decoded line by line, so line numbers stay right.
+    assert DENYLIST.spans('{"a": "x\\nBluefinch"}\nBluefinch\n"\\u00e9"\nChlo\\u00e9') == [
+        (1, 1),
+        (2, 2),
+        (4, 4),
+    ]
+
+
+def test_spans_are_linear() -> None:
+    denylist = Denylist("Bluefinch\nrue des Lilas")
+    start = time.perf_counter()
+    assert len(denylist.spans("bluefinch\n" * 200_000)) == 200_000
+    assert denylist.spans("bluefinch " * 500_000) == [(1, 1)]
+    assert denylist.spans("rue " * 300_000) == []
+    assert not denylist.matches("getMaxValue camelCase \\n%41 " * 50_000)
+    assert time.perf_counter() - start < 5
+
+
+def test_normalize_and_unescape() -> None:
+    assert normalize("ASCII Text") == "ascii text"
+    assert normalize("Ærø Œuvre ß\N{SOFT HYPHEN}x\nY") == "aero oeuvre ssx\ny"
+    assert unescape("plain text") is None
+    assert unescape("a\\\\nb") == "a\\nb"
+    assert unescape("x\\u000ay\nz") == "x y\nz"
+    assert unescape("\\ud83d\\ude00 \\U00110000 %ff &lt;") == "\N{GRINNING FACE} \ufffd \xff <"
+
+
+def test_binary_content() -> None:
+    denylist = Denylist(f"Bluefinch\nHélène Dupont\n{SHORT_NAMES}")
+    assert denylist.matches_binary(b"\x00\x01Artist\x00Bluefinch\x00")
+    assert denylist.matches_binary(b"\x00<dc:title>Leo on the sofa</dc:title>")
+    assert denylist.matches_binary(b"\xff\xfe" + "Bluefinch".encode("utf-16-le"))
+    assert denylist.matches_binary(b"\x00" + "Hélène Dupont".encode("utf-16-be"))
+    assert denylist.matches_binary(b"\x00" + "Hélène Dupont".encode() + b"\x00")
+    assert denylist.matches_binary(b"\x00" + "Hélène Dupont".encode("latin-1") + b"\x00")
+    assert denylist.matches_binary(b"\x00" + "Leo on the sofa".encode("utf-16-le"))
+    assert not denylist.matches_binary(b"\x00IDATxd%Leo#q\x00")
+    assert not denylist.matches_binary(b"\x00Leo\x00")
+    # Short terms are not looked for in single byte Latin strings, and a
+    # symbol that folds into a space does not make a phrase.
+    assert not denylist.matches_binary(b"\x00Le\xf3 on the sofa\x00")
+    assert not denylist.matches_binary(b"\x00$t-aN\xe0\x92\xa8cL\x00")
+
+
+def test_short_terms_do_not_match_random_binary_content() -> None:
+    denylist = Denylist(f"{SHORT_NAMES}\nbus 917\nrue des Lilas")
+    generator = random.Random(1)
+    blobs = [generator.randbytes(200_000) for _ in range(50)]
+    assert not any(denylist.matches_binary(blob) for blob in blobs)
+
+
+def test_redact_path_hides_every_spelling() -> None:
+    assert DENYLIST.redact_path("docs/BLUEFINCH/notes.md") == "docs/[redacted]/notes.md"
+    assert DENYLIST.redact_path("a/rue_des_lilas.yaml") == "a/[redacted]"
+    assert DENYLIST.redact_path("a/ruedeslilas.md") == "a/[redacted]"
+    assert DENYLIST.redact_path("rue/des/lilas.md") == "[redacted path]"
+    assert DENYLIST.redact_path("docs/ok.md") == "docs/ok.md"
+
+
+def test_location() -> None:
+    assert location(DENYLIST, "docs/ok.md") == ("docs/ok.md", "docs/ok.md")
+    assert location(DENYLIST, "docs/Bluefinch.md") == ("docs/[redacted]", None)
+
+
+def test_mask_values_cover_spelling_variants() -> None:
+    values = Denylist(
+        "Rue des Lilas\nÉté\nZoé\nab\nl\N{RIGHT SINGLE QUOTATION MARK}Orée\nOne Two Three Four"
+    ).mask_values()
+    assert {"Rue des Lilas", "rue des lilas", "RUE DES LILAS", "rue_des_lilas"} <= values
+    assert {"Rue-des-Lilas", "rue.des.lilas", "ruedeslilas", "rue_des-lilas"} <= values
+    assert {"Été", "ete", "Ete", "ETE", "Zoé", "zoe", "Zoe", "ZOE"} <= values
+    assert {
+        "l\N{RIGHT SINGLE QUOTATION MARK}Orée",
+        "l'Orée",
+        "l'oree",
+        "l_oree",
+        "L Oree",
+    } <= values
+    assert {"one_two_three_four", "OneTwoThreeFour"} <= values
+    assert "one_two-three_four" not in values
+    assert "ab" not in values
+
+
+def test_denylist_sources() -> None:
+    environ = {
+        "CI_SECRETS": '{"github_token": "x", "PRIVACY_DENYLIST": "Bluefinch",'
+        ' "privacy_denylist_extra": "rue des Lilas", "PRIVACY_DENYLIST_NUMBER": 3,'
+        ' "OTHER": "secret"}',
+        "PRIVACY_DENYLIST": "ignored, the secret wins",
+        "PRIVACY_DENYLIST_LOCAL": "Pré-Vert",
+        "PATH": "/usr/bin",
+    }
+    assert denylist_sources(environ) == ["Bluefinch", "rue des Lilas", "Pré-Vert"]
+    assert "CI_SECRETS" not in environ
+    assert denylist_sources({"PATH": "/usr/bin"}) == []
+    assert denylist_sources({"CI_SECRETS": ""}) == []
+
+
+@pytest.mark.parametrize("value", ["{not json", '["PRIVACY_DENYLIST"]'])
+def test_denylist_sources_reject_bad_json(value: str) -> None:
+    environ = {"CI_SECRETS": value}
+    with pytest.raises(CheckError, match="CI_SECRETS") as error:
+        denylist_sources(environ)
+    assert value not in str(error.value)
+    assert "CI_SECRETS" not in environ

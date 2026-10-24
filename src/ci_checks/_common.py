@@ -9,6 +9,7 @@ import os
 import re
 import subprocess
 import sys
+import tempfile
 from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
@@ -17,12 +18,29 @@ MAX_TEXT_BYTES = 1_000_000
 MAX_SCAN_BYTES = 20_000_000
 BINARY_SNIFF_BYTES = 8192
 EMPTY_SHA = "0" * 40
+GITLINK_MODE = "160000"
 # Dependency update bots whose commits quote upstream text. Usernames with
 # brackets are reserved for GitHub Apps, so no person can use these logins.
 DEPENDENCY_BOTS = frozenset({"dependabot[bot]"})
+# Error handler that reads bytes which are not UTF-8 as Windows-1252, the
+# encoding that Windows tools and spreadsheet exports use in Western Europe,
+# so that accented text in those files can still be checked.
+LEGACY = "ci-legacy"
+_CP1252 = tuple(bytes([byte]).decode("cp1252", errors="ignore") or chr(byte) for byte in range(256))
 _PRAGMA = re.compile(r"ci-allow:\s*([a-z0-9-]+(?:\s*,\s*[a-z0-9-]+)*)")
-_HUNK = re.compile(r"^(@{2,}) (?:-\d+(?:,\d+)? )+\+(\d+)(?:,\d+)? @{2,}")
-_INDEX = re.compile(r"^index (?:[0-9a-f]+,)*[0-9a-f]+\.\.([0-9a-f]+)")
+_HUNK = re.compile(rb"^(@{2,}) (?:-\d+(?:,\d+)? )+\+(\d+)(?:,(\d+))? @{2,}")
+_INDEX = re.compile(rb"^index (?:[0-9a-f]+,)*[0-9a-f]+\.\.([0-9a-f]+)(?: (\d+))?$")
+_MODE = re.compile(rb"^(?:new file|new|deleted file) mode (\d+)$")
+
+
+def _read_legacy(error: UnicodeError) -> tuple[str, int]:
+    if not isinstance(error, UnicodeDecodeError):
+        raise error
+    chunk = error.object[error.start : error.end]
+    return "".join(_CP1252[byte] for byte in chunk), error.end
+
+
+codecs.register_error(LEGACY, _read_legacy)
 
 
 @dataclass(frozen=True)
@@ -50,16 +68,19 @@ class Commit:
 
 @dataclass(frozen=True)
 class Change:
-    """A file written by a commit, with the lines the commit added to it.
+    """A file written by a commit, with the numbers of the lines it added.
 
     `blob` is the id of the new content, or empty when the commit deleted the
-    file or only changed its mode.
+    file. `added` is None when git found the content binary and did not diff
+    it, so that every line of the content counts as added. Paths are file
+    system strings, as `os.fsdecode` returns them.
     """
 
     sha: str
     path: str
     blob: str
-    added: tuple[tuple[int, str], ...]
+    mode: str
+    added: frozenset[int] | None
 
 
 @dataclass(frozen=True)
@@ -82,18 +103,21 @@ class CheckError(Exception):
     """Raised when a check cannot run, for example on a shallow clone."""
 
 
+def git_bytes(*args: str, cwd: Path | None = None, stdin: bytes | None = None) -> bytes:
+    """Run git and return its standard output as bytes."""
+    return subprocess.run(
+        ["git", *args], cwd=cwd, input=stdin, check=True, capture_output=True
+    ).stdout
+
+
 def git(*args: str, cwd: Path | None = None) -> str:
-    """Run git and return its standard output."""
-    result = subprocess.run(
-        ["git", *args],
-        cwd=cwd,
-        check=True,
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-    )
-    return result.stdout
+    """Run git and return its standard output, without changing line endings."""
+    return git_bytes(*args, cwd=cwd).decode("utf-8", LEGACY)
+
+
+def display_path(path: str) -> str:
+    """Return a file system path as text, reading names that are not UTF-8 as Windows-1252."""
+    return os.fsencode(path).decode("utf-8", LEGACY)
 
 
 def require_full_history(root: Path) -> None:
@@ -104,8 +128,8 @@ def require_full_history(root: Path) -> None:
 
 def tracked_files(root: Path) -> list[str]:
     """Return the paths tracked by git, relative to the repository root."""
-    output = git("ls-files", "-z", cwd=root)
-    return sorted(path for path in output.split("\0") if path)
+    output = git_bytes("ls-files", "-z", cwd=root)
+    return sorted(os.fsdecode(path) for path in output.split(b"\0") if path)
 
 
 def matches_any(path: str, patterns: Iterable[str]) -> bool:
@@ -133,8 +157,10 @@ def read_bytes(path: Path, limit: int) -> bytes | None:
 def decode_text(data: bytes) -> str | None:
     """Return the text of file content, or None when it is binary.
 
-    UTF-16 and UTF-32 with a byte order mark are decoded too, because Windows
-    editors and shells write them; anything else is read as UTF-8.
+    UTF-16 and UTF-32 are decoded too, because Windows editors and shells
+    write them: with a byte order mark, or UTF-16 without one when every
+    other byte is zero. Anything else is read as UTF-8, with the bytes that
+    are not UTF-8 read as Windows-1252.
     """
     for boms, encoding in (
         ((codecs.BOM_UTF32_LE, codecs.BOM_UTF32_BE), "utf-32"),
@@ -142,9 +168,21 @@ def decode_text(data: bytes) -> str | None:
     ):
         if data.startswith(boms):
             return data.decode(encoding, errors="replace")
-    if b"\0" in data[:BINARY_SNIFF_BYTES]:
-        return None
-    return data.decode("utf-8", errors="replace")
+    if b"\0" not in data[:BINARY_SNIFF_BYTES]:
+        return data.decode("utf-8-sig", LEGACY)
+    return _utf16_without_bom(data)
+
+
+def _utf16_without_bom(data: bytes) -> str | None:
+    sample = data[: BINARY_SNIFF_BYTES - BINARY_SNIFF_BYTES % 2]
+    pairs = len(sample) // 2
+    even, odd = sample[0::2].count(0), sample[1::2].count(0)
+    for encoding, zeros, others in (("utf-16-le", odd, even), ("utf-16-be", even, odd)):
+        if pairs >= 4 and zeros >= pairs * 0.9 and others <= pairs * 0.02:
+            text = data[: len(data) - len(data) % 2].decode(encoding, errors="replace")
+            controls = sum(char < " " and char not in "\t\n\r\f" for char in text)
+            return text if controls <= len(text) * 0.01 else None
+    return None
 
 
 def read_text(path: Path, limit: int = MAX_TEXT_BYTES) -> str | None:
@@ -257,112 +295,155 @@ def _is_commit(revision: str, root: Path | None) -> bool:
     return True
 
 
-_RECORD = "\x1e"
+_RECORD = b"\x1e"
 _ESCAPES = {"a": 7, "b": 8, "t": 9, "n": 10, "v": 11, "f": 12, "r": 13, '"': 34, "\\": 92}
 
 
 def commits(root: Path, revisions: list[str]) -> list[Commit]:
-    """Return the commits selected by git log revision arguments."""
-    # Git refuses NUL bytes in names, addresses and messages, so it is a safe
-    # separator for both fields and records.
-    fmt = "%x00".join(["%H", "%an", "%ae", "%cn", "%ce", "%B"])
-    output = git("log", "-z", f"--format={fmt}", *revisions, "--", cwd=root)
-    fields = output.split("\0")
-    result = []
-    for start in range(0, len(fields) - 5, 6):
-        sha, an, ae, cn, ce, message = fields[start : start + 6]
-        result.append(Commit(sha, an, ae, cn, ce, message.strip("\n")))
-    return result
+    """Return the commits selected by git log revision arguments.
+
+    The commit objects are read as stored, so that a message with a NUL byte,
+    which git log would cut short, is checked whole.
+    """
+    shas = git("rev-list", *revisions, "--", cwd=root).split()
+    objects = _cat_file(root, shas, limit=None)
+    return [_parse_commit(sha, objects[sha] or b"") for sha in shas]
+
+
+def _parse_commit(sha: str, data: bytes) -> Commit:
+    header, _, body = data.partition(b"\n\n")
+    people: dict[bytes, bytes] = {}
+    encoding = "utf-8"
+    for line in header.split(b"\n"):
+        key, _, value = line.partition(b" ")
+        if key in (b"author", b"committer"):
+            people.setdefault(key, value)
+        elif key == b"encoding":
+            encoding = value.decode("ascii", errors="replace")
+
+    def decode(raw: bytes) -> str:
+        try:
+            if codecs.lookup(encoding).name != "utf-8":
+                return raw.decode(encoding, errors="replace")
+        except LookupError:
+            pass
+        return raw.decode("utf-8", LEGACY)
+
+    an, ae = _identity(people.get(b"author", b""))
+    cn, ce = _identity(people.get(b"committer", b""))
+    return Commit(sha, decode(an), decode(ae), decode(cn), decode(ce), decode(body).strip("\n"))
+
+
+def _identity(value: bytes) -> tuple[bytes, bytes]:
+    """Split "Name <address> timestamp zone" into the name and the address."""
+    start, end = value.find(b"<"), value.rfind(b">")
+    if start < 0 or end < start:
+        return value, b""
+    return value[:start].strip(), value[start + 1 : end]
 
 
 def changes(root: Path, revisions: list[str]) -> list[Change]:
-    """Return the files written by the selected commits, with their added lines.
+    """Return the files written by the selected commits, with the lines they added.
 
     Lines that a later commit removes are included, because the commit that
-    added them stays reachable after the pull request is merged. Every file
-    is diffed as text, whatever its attributes say; for merges, only the
-    lines that differ from every parent count, which is what the merge
-    itself introduced.
+    added them stays reachable after the pull request is merged. For merges,
+    only the lines that differ from every parent count, which is what the
+    merge itself introduced. The patch is read as bytes, line by line, so
+    that carriage returns and odd bytes in files or names cannot shift it.
     """
-    output = git(
+    command = [
+        "git",
         "-c",
         "core.quotePath=false",
         "log",
         "--patch",
         "--cc",
-        "--text",
         "--no-textconv",
         "--no-ext-diff",
         "--no-renames",
         "--no-color",
         "--full-index",
+        "--src-prefix=a/",
+        "--dst-prefix=b/",
         "--unified=0",
-        f"--format={_RECORD}%H",
+        "--format=%x1e%H",
         *revisions,
         "--",
-        cwd=root,
-    )
+    ]
     result: list[Change] = []
-    sha = path = blob = ""
-    added: list[tuple[int, str]] = []
+    sha = path = blob = mode = ""
+    added: set[int] | None = set()
     open_file = in_header = False
     parents = line = 0
 
     def close() -> None:
         if open_file:
-            result.append(Change(sha, path, blob, tuple(added)))
+            lines = None if added is None else frozenset(added)
+            result.append(Change(sha, path, blob, mode, lines))
 
-    for raw in output.split("\n"):
-        if raw.startswith(_RECORD):
-            close()
-            sha, open_file = raw[1:], False
-        elif raw.startswith(("diff --git ", "diff --cc ", "diff --combined ")):
-            close()
-            path, blob, added = _header_path(raw), "", []
-            open_file = in_header = True
-        elif not open_file:
-            continue
-        elif hunk := _HUNK.match(raw):
-            in_header = False
-            parents, line = len(hunk.group(1)) - 1, int(hunk.group(2))
-        elif in_header:
-            if index := _INDEX.match(raw):
-                blob = "" if set(index.group(1)) == {"0"} else index.group(1)
-            elif raw == "+++ /dev/null":
-                blob = ""
-        elif len(raw) >= parents and not raw.startswith("\\"):
-            markers = raw[:parents]
-            if "-" in markers:
-                continue  # A line of a parent that the commit removed.
-            if markers == "+" * parents:
-                added.append((line, raw[parents:]))
-            line += 1
-    close()
+    with tempfile.TemporaryFile() as errors:
+        process = subprocess.Popen(command, cwd=root, stdout=subprocess.PIPE, stderr=errors)
+        assert process.stdout is not None  # noqa: S101 - set by stdout=PIPE above.
+        for raw in process.stdout:
+            raw = raw.removesuffix(b"\n")
+            if raw.startswith(_RECORD):
+                close()
+                sha, open_file = raw[1:].decode("ascii"), False
+            elif raw.startswith((b"diff --git ", b"diff --cc ", b"diff --combined ")):
+                close()
+                path, blob, mode, added = os.fsdecode(_header_path(raw)), "", "", set()
+                open_file = in_header = True
+            elif not open_file:
+                continue
+            elif hunk := _HUNK.match(raw):
+                in_header = False
+                parents, line = len(hunk.group(1)) - 1, int(hunk.group(2))
+            elif in_header:
+                if index := _INDEX.match(raw):
+                    blob = "" if set(index.group(1)) == {ord("0")} else index.group(1).decode()
+                    mode = (index.group(2) or mode.encode()).decode()
+                elif changed := _MODE.match(raw):
+                    mode = changed.group(1).decode()
+                elif raw == b"+++ /dev/null":
+                    blob = ""
+                elif raw.startswith(b"Binary files "):
+                    added = None
+            elif added is not None and len(raw) >= parents and not raw.startswith(b"\\"):
+                markers = raw[:parents]
+                if b"-" in markers:
+                    continue  # A line of a parent that the commit removed.
+                if markers == b"+" * parents:
+                    added.add(line)
+                line += 1
+        close()
+        if process.wait():
+            errors.seek(0)
+            raise subprocess.CalledProcessError(process.returncode, command, stderr=errors.read())
     return result
 
 
-def _header_path(header: str) -> str:
+def _header_path(header: bytes) -> bytes:
     """Return the path named by a diff header line."""
-    if header.startswith("diff --git "):
+    if header.startswith(b"diff --git "):
         # Without renames both sides name the same path: "a/<p> b/<p>".
-        rest = header[len("diff --git ") :]
-        if rest.startswith('"'):
+        rest = header[len(b"diff --git ") :]
+        if rest.startswith(b'"'):
             half = (len(rest) - 8) // 2
             return _unquote(rest[3 : 3 + half])
         half = (len(rest) - 5) // 2
         return rest[2 : 2 + half]
-    rest = header.split(" ", 2)[2]
-    return _unquote(rest[1:-1]) if rest.startswith('"') else rest
+    rest = header.split(b" ", 2)[2]
+    return _unquote(rest[1:-1]) if rest.startswith(b'"') else rest
 
 
-def _unquote(text: str) -> str:
+def _unquote(text: bytes) -> bytes:
     """Decode the C-style escapes that git uses in quoted paths."""
     out = bytearray()
     index = 0
     while index < len(text):
-        char = text[index]
-        if char == "\\" and index + 1 < len(text):
-            escape = text[index + 1]
+        char = text[index : index + 1]
+        if char == b"\\" and index + 1 < len(text):
+            escape = chr(text[index + 1])
             if escape in "01234567":
                 out.append(int(text[index + 1 : index + 4], 8) & 0xFF)
                 index += 4
@@ -371,42 +452,46 @@ def _unquote(text: str) -> str:
                 out.append(_ESCAPES[escape])
                 index += 2
                 continue
-        out.extend(char.encode("utf-8"))
+        out += char
         index += 1
-    return out.decode("utf-8", errors="replace")
+    return bytes(out)
 
 
 def blob_contents(root: Path, blobs: Iterable[str], limit: int) -> dict[str, bytes | None]:
-    """Return the content of git blobs, or None for those missing or over the limit."""
-    wanted = sorted(set(blobs))
-    if not wanted:
+    """Return the content of git blobs, with None for those over the limit.
+
+    Blobs that are missing from the repository are left out.
+    """
+    return _cat_file(root, sorted(set(blobs)), limit, kind="blob")
+
+
+def _cat_file(
+    root: Path, ids: list[str], limit: int | None, kind: str | None = None
+) -> dict[str, bytes | None]:
+    if not ids:
         return {}
-    request = "".join(f"{blob}\n" for blob in wanted).encode()
-    checked = subprocess.run(
-        ["git", "cat-file", "--batch-check"],
-        cwd=root,
-        input=request,
-        capture_output=True,
-        check=True,
-    ).stdout.decode()
-    result: dict[str, bytes | None] = dict.fromkeys(wanted)
-    small = []
+    request = "".join(f"{object_id}\n" for object_id in ids).encode()
+    checked = git_bytes("cat-file", "--batch-check", cwd=root, stdin=request).decode()
+    result: dict[str, bytes | None] = {}
+    wanted = []
     for entry in checked.splitlines():
         fields = entry.split()
-        if len(fields) == 3 and fields[1] == "blob" and int(fields[2]) <= limit:
-            small.append(fields[0])
-    if not small:
+        if len(fields) != 3 or (kind and fields[1] != kind):
+            continue
+        if limit is not None and int(fields[2]) > limit:
+            result[fields[0]] = None
+        else:
+            wanted.append(fields[0])
+    if not wanted:
         return result
-    request = "".join(f"{blob}\n" for blob in small).encode()
-    output = subprocess.run(
-        ["git", "cat-file", "--batch"], cwd=root, input=request, capture_output=True, check=True
-    ).stdout
+    request = "".join(f"{object_id}\n" for object_id in wanted).encode()
+    output = git_bytes("cat-file", "--batch", cwd=root, stdin=request)
     position = 0
     while position < len(output):
         end = output.index(b"\n", position)
-        blob, _, size = output[position:end].decode().split()
+        object_id, _, size = output[position:end].decode().split()
         start = end + 1
-        result[blob] = output[start : start + int(size)]
+        result[object_id] = output[start : start + int(size)]
         position = start + int(size) + 1
     return result
 
@@ -423,14 +508,14 @@ class Reporter:
         self.count += 1
         location = ""
         if path:
-            location = f" file={_escape_property(path)}"
+            location = f" file={_escape_property(display_path(path))}"
             if line:
                 location += f",line={line}"
-        print(f"::error{location}::{_escape_data(message)}")
+        print(f"::error{location}::{_escape_data(_printable(message))}")
 
     def warning(self, message: str) -> None:
         """Report something that needs attention without failing the check."""
-        print(f"::warning::{_escape_data(message)}")
+        print(f"::warning::{_escape_data(_printable(message))}")
 
     def finish(self) -> int:
         """Print a summary and return the exit code."""
@@ -443,8 +528,13 @@ class Reporter:
 
 def fail(message: str) -> int:
     """Print an error that stops a check and return its exit code."""
-    print(f"::error::{_escape_data(message)}", file=sys.stderr)
+    print(f"::error::{_escape_data(_printable(message))}", file=sys.stderr)
     return 1
+
+
+def _printable(value: str) -> str:
+    """Return text that can be printed, with file names that are not UTF-8 decoded."""
+    return value.encode("utf-8", "surrogateescape").decode("utf-8", LEGACY)
 
 
 def _escape_data(value: str) -> str:
