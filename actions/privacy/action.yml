@@ -12,8 +12,17 @@ inputs:
     description: Globs of files skipped by the generic patterns (never by the denylist or gitleaks).
     default: ""
   require-denylist:
-    description: Fail when the denylist is empty. Pull requests from forks only warn.
+    description: >-
+      Fail when the denylist is empty. Pull requests from forks never receive
+      secrets, so with this set they always fail.
     default: "true"
+  secrets-ignore:
+    description: >-
+      Fingerprints of known gitleaks false positives already in the history
+      of the base branch, one per line, as commit:path:rule:line (with an
+      empty path for a commit message). Each ignored finding is reported as a
+      warning.
+    default: ""
 runs:
   using: composite
   steps:
@@ -36,34 +45,16 @@ runs:
       uses: $/actions/setup-tools
       with:
         tools: gitleaks
-    - name: Scan history for secrets
+    # gitleaks reads every commit of the history, then the commit messages,
+    # the pull request text and the files it cannot read in a diff.
+    - name: Scan for secrets
       if: ${{ !cancelled() }}
       shell: bash
       env:
         CONFIG: ${{ github.action_path }}/gitleaks.toml
-        # The history of the pull request head, or of the pushed commit.
-        TIP: ${{ github.event.pull_request.head.sha || 'HEAD' }}
-      run: |
-        # gitleaks also reads .gitleaksignore from the scanned tree and the
-        # working directory, so it runs from an empty directory on the git
-        # directory itself: the files of a pull request cannot hide a finding.
-        git_dir="$(git rev-parse --absolute-git-dir)"
-        work="$(mktemp -d)"
-        report="${work}.json"
-        cd "$work"
-        gitleaks git --no-banner --redact --exit-code 0 --config "$CONFIG" \
-          --gitleaks-ignore-path "$work" --log-opts="$TIP" \
-          --report-format json --report-path "$report" "$git_dir"
-        # Report where each secret is, without the author fields that
-        # --verbose would print.
-        jq -r 'def prop: gsub("%"; "%25") | gsub("\r"; "%0D") | gsub("\n"; "%0A")
-            | gsub(":"; "%3A") | gsub(","; "%2C");
-          .[] | "::error file=\(.File | prop),line=\(.StartLine)::Possible secret"
-            + " (\(.RuleID)) added by commit \(.Commit[0:12]). Revoke it, then remove it"
-            + " from the history."' "$report"
-        count="$(jq length "$report")"
-        if [[ "$count" -gt 0 ]]; then
-          echo "Secrets: ${count} finding(s)."
-          exit 1
-        fi
-        echo "Secrets: no problem found."
+        SECRETS_IGNORE: ${{ inputs.secrets-ignore }}
+        PYTHONPATH: ${{ github.action_path }}/../../src
+      run: >-
+        python3 -P -m ci_checks.secrets
+        --config "$CONFIG"
+        --ignore "$SECRETS_IGNORE"

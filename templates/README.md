@@ -23,6 +23,12 @@ After copying the files:
 
 1. Add a ruleset on `main` that requires a pull request, allows squash
    merging only and requires the **Report** status check.
-2. Enable private vulnerability reporting (Settings, Security).
-3. Give the repository access to the `PRIVACY_DENYLIST` organization secret,
+2. In Settings, General, Pull Requests, set the default commit message of
+   squash merging to **Pull request title and description**. The commit on
+   `main` then takes the title, which CI checks against Conventional
+   Commits, and the description, which CI checks for secrets and personal
+   data. GitHub's default message reuses the commit message instead when a
+   pull request has a single commit, so the title would not reach `main`.
+3. Enable private vulnerability reporting (Settings, Security).
+4. Give the repository access to the `PRIVACY_DENYLIST` organization secret,
    both as an Actions secret and as a Dependabot secret.

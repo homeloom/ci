@@ -1,7 +1,8 @@
 name: Release
 
-# Tag a release of this repository when CI passes on main and the version in
-# pyproject.toml has no tag yet.
+# Tag a release of this repository when CI passes on the commit of main that
+# changes the version in pyproject.toml, if the version has no tag yet and is
+# greater than every release.
 
 on:
   workflow_run:

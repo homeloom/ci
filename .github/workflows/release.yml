@@ -1,7 +1,8 @@
 name: Publish release
 
-# Publish a release for a commit of the default branch whose CI passed.
-# Call it from a workflow triggered by workflow_run after CI completes.
+# Publish a release for a commit of the default branch whose CI passed, when
+# that commit changed the version to one greater than every release. Call it
+# from a workflow triggered by workflow_run after CI completes.
 
 on:
   workflow_call:
@@ -33,6 +34,8 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ inputs.sha }}
+          # The parent tells whether this commit changed the version.
+          fetch-depth: 2
           persist-credentials: false
 
       - name: Publish

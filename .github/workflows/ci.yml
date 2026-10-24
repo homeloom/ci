@@ -56,16 +56,34 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Install uv
+      # The secret scan tests run gitleaks.
+      - name: Install uv and gitleaks
         uses: $/actions/setup-tools
         with:
-          tools: uv
+          tools: uv gitleaks
 
       - name: Install test dependencies
         run: uv pip install --system --require-hashes --requirement requirements-dev.txt
 
       - name: Run tests
         run: python -m pytest
+
+      # The coverage configuration in pyproject.toml excludes the lines marked
+      # with the pragma; each must say why, as in the repositories using
+      # ha-tests.yml.
+      - name: Check coverage pragmas
+        if: ${{ !cancelled() }}
+        run: |
+          pragma='#[[:space:]]*(pragma|PRAGMA)[:[:space:]]?[[:space:]]*(no|NO)[[:space:]]*(cover|COVER)'
+          reason="${pragma}[[:space:]]*[-:][[:space:]]*[[:alnum:]]"
+          status=0
+          while IFS= read -r -d '' path && IFS=: read -r number line; do
+            if [[ ! "$line" =~ $reason ]]; then
+              echo "::error::${path}:${number}: give the reason after the pragma, as in \"# pragma: no cover - <reason>\"."
+              status=1
+            fi
+          done < <(git ls-files -z -- 'src/*.py' | xargs -0 --no-run-if-empty grep -nHZE "$pragma" --)
+          exit "$status"
 
       - name: Install actionlint
         if: ${{ !cancelled() }}
