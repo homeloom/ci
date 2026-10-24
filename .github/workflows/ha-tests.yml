@@ -87,7 +87,8 @@ jobs:
             # Old releases do not pin their transitive dependencies, and newer
             # ones break them. Resolve as of one week after the release, which
             # matches what an install of that release had.
-            uploaded="$(curl -fsS "https://pypi.org/pypi/homeassistant/${MINIMUM}/json" \
+            uploaded="$(curl -fsS --retry 3 --connect-timeout 10 --max-time 60 \
+              "https://pypi.org/pypi/homeassistant/${MINIMUM}/json" \
               | jq -er '.urls[0].upload_time_iso_8601')"
             echo "spec=homeassistant==${MINIMUM}" >> "$GITHUB_OUTPUT"
             echo "cutoff=$(date -u -d "${uploaded} + 7 days" +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"

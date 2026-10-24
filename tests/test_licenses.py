@@ -11,6 +11,7 @@ from ci_checks import licenses
 from ci_checks._common import Reporter
 
 ALLOWED = licenses.DEFAULT_ALLOWED
+Capture = pytest.CaptureFixture[str]
 MIT_TEXT = "MIT License\n\nPermission is hereby granted, free of charge, to any person\n"
 
 
@@ -88,7 +89,7 @@ def make_site(target: Path, packages: dict[str, str]) -> None:
         (directory / "METADATA").write_text(text, encoding="utf-8")
 
 
-def test_check_dependencies(tmp_path: Path, capsys) -> None:
+def test_check_dependencies(tmp_path: Path, capsys: Capture) -> None:
     make_site(
         tmp_path,
         {
@@ -118,8 +119,8 @@ def test_manifest_requirements(tmp_path: Path) -> None:
     assert licenses.manifest_requirements(tmp_path) == ["lib-a==1.0"]
 
 
-def test_install_command(tmp_path: Path, monkeypatch) -> None:
-    calls = []
+def test_install_command(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[list[str]] = []
     monkeypatch.setattr(licenses.subprocess, "run", lambda command, check: calls.append(command))
     licenses.install(["lib==1.0"], [tmp_path / "req.txt"], tmp_path / "site", "3.14")
     command = calls[0]
@@ -133,15 +134,21 @@ def test_install_command(tmp_path: Path, monkeypatch) -> None:
     assert listing.read_text(encoding="utf-8") == "lib==1.0\n"
 
 
-def test_install_rejects_options_in_requirements(tmp_path: Path, monkeypatch) -> None:
-    calls = []
+@pytest.mark.parametrize(
+    "requirement",
+    ["--index-url=https://pkgs.example.com", "lib\n--index-url https://pkgs.example.com"],
+)
+def test_install_rejects_options_in_requirements(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, requirement: str
+) -> None:
+    calls: list[list[str]] = []
     monkeypatch.setattr(licenses.subprocess, "run", lambda command, check: calls.append(command))
     with pytest.raises(ValueError, match="Invalid manifest requirement"):
-        licenses.install(["--index-url=https://pkgs.example.com"], [], tmp_path / "site", "3.14")
+        licenses.install([requirement], [], tmp_path / "site", "3.14")
     assert calls == []
 
 
-def test_main_license_file(tmp_path: Path, capsys) -> None:
+def test_main_license_file(tmp_path: Path, capsys: Capture) -> None:
     assert licenses.main(["--root", str(tmp_path)]) == 1
     assert "has no LICENSE file" in capsys.readouterr().out
 
@@ -156,11 +163,15 @@ def test_main_license_file(tmp_path: Path, capsys) -> None:
     assert licenses.main(["--root", str(tmp_path), "--license", "LicenseRef-Custom"]) == 0
 
 
-def test_main_dependencies(tmp_path: Path, monkeypatch, capsys) -> None:
+def test_main_dependencies(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: Capture
+) -> None:
     (tmp_path / "LICENSE").write_text(MIT_TEXT, encoding="utf-8")
     (tmp_path / "requirements.txt").write_text("lib==1.0\n", encoding="utf-8")
 
-    def fake_install(requirements, files, target, python_version):
+    def fake_install(
+        requirements: list[str], files: list[Path], target: Path, python_version: str
+    ) -> None:
         assert files == [tmp_path / "requirements.txt"]
         make_site(target, {"lib": metadata("lib", License_Expression="GPL-3.0-only")})
 

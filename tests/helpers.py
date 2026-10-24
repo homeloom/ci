@@ -3,9 +3,13 @@
 from __future__ import annotations
 
 import subprocess
+from collections.abc import Callable
 from pathlib import Path
 
 NOREPLY = "1+octocat@users.noreply.github.com"
+DEPENDABOT = "49699333+dependabot[bot]@users.noreply.github.com"
+# The `event` fixture: writes an event payload for the checks to read.
+EventWriter = Callable[[dict], None]
 
 
 class Repo:
@@ -26,10 +30,13 @@ class Repo:
             env=env,
         ).stdout
 
-    def write(self, path: str, content: str) -> None:
+    def write(self, path: str, content: str | bytes) -> None:
         target = self.root / path
         target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(content, encoding="utf-8")
+        if isinstance(content, bytes):
+            target.write_bytes(content)
+        else:
+            target.write_text(content, encoding="utf-8")
 
     def commit(
         self,
@@ -55,7 +62,7 @@ def pr_event(
     head: str,
     title: str = "feat: add a thing",
     body: str = "",
-    bot: bool = False,
+    login: str = "octocat",
     fork: bool = False,
 ) -> dict:
     """Return a minimal pull_request event payload."""
@@ -63,7 +70,7 @@ def pr_event(
         "pull_request": {
             "title": title,
             "body": body,
-            "user": {"type": "Bot" if bot else "User"},
+            "user": {"login": login, "type": "Bot" if login.endswith("[bot]") else "User"},
             "base": {"sha": base, "repo": {"full_name": "owner/repo"}},
             "head": {
                 "sha": head,

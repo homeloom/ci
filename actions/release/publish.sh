@@ -16,5 +16,12 @@ flags=(--target "$SHA" --title "$tag" --notes-file "$notes")
 if [[ "$PRERELEASE" == "true" ]]; then
   flags+=(--prerelease)
 fi
-gh release create "$tag" "${flags[@]}"
+if ! gh release create "$tag" "${flags[@]}"; then
+  # Another run may have published the same version in the meantime.
+  if gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${tag}" --silent 2>/dev/null; then
+    echo "::notice::Tag ${tag} was created by another run; nothing to release."
+    exit 0
+  fi
+  exit 1
+fi
 echo "::notice::Published ${tag}."

@@ -11,8 +11,9 @@ on:
 
 permissions: {}
 
+# One group per commit, so that a run waiting for another is never dropped.
 concurrency:
-  group: release
+  group: release-${{ github.event.workflow_run.head_sha }}
   cancel-in-progress: false
 
 jobs:

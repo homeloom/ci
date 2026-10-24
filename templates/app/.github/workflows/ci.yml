@@ -3,9 +3,10 @@ name: CI
 # CI of a repository of Home Assistant apps, built from the shared workflows of
 # homeloom/ci. Branch protection requires the Report job.
 #
-# Draft pull requests skip every job except Report, which fails in seconds to
-# show that CI has not run; marking the pull request ready for review runs CI
-# once. Editing the title or body runs it again, because the title becomes the
+# Draft pull requests only run the hygiene checks, which take seconds and find
+# personal data as soon as it is pushed; Report then fails to show that CI has
+# not fully run. Marking the pull request ready for review runs CI once.
+# Editing the title or body runs it again, because the title becomes the
 # commit message and both are checked for personal data.
 
 on:
@@ -17,17 +18,20 @@ on:
 permissions:
   contents: read
 
+# One group per pull request, where a new push cancels the previous run, and
+# one per commit on main, where every commit must be checked.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.sha }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  # Runs on drafts too: it is fast, and finds personal data as soon as it is pushed.
   hygiene:
-    if: github.event.pull_request.draft != true
     uses: homeloom/ci/.github/workflows/hygiene.yml@REPLACE_WITH_RELEASE_SHA # vX.Y.Z
     with:
-      # Session links that AI coding assistants add to commits and pull requests.
-      allowed-domains: claude.ai claude.com
+      # Session links and noreply commit addresses of AI coding assistants.
+      # Keep only the domains of the assistants that contribute.
+      allowed-domains: anthropic.com claude.ai claude.com
     secrets:
       PRIVACY_DENYLIST: ${{ secrets.PRIVACY_DENYLIST }}
 
@@ -46,15 +50,16 @@ jobs:
     needs: [hygiene, apps]
     runs-on: ubuntu-24.04
     timeout-minutes: 2
+    permissions: {}
     steps:
       - name: Check results
         env:
           DRAFT: ${{ github.event.pull_request.draft == true }}
           NEEDS: ${{ toJSON(needs) }}
         run: |
+          jq -r 'to_entries[] | "\(.key): \(.value.result)"' <<< "$NEEDS"
           if [[ "$DRAFT" == "true" ]]; then
-            echo "::error::Draft pull request: CI was skipped. Mark it ready for review to run it."
+            echo "::error::Draft pull request: only the hygiene checks ran. Mark it ready for review to run CI."
             exit 1
           fi
-          jq -r 'to_entries[] | "\(.key): \(.value.result)"' <<< "$NEEDS"
           jq -e 'all(.[]; .result == "success")' <<< "$NEEDS" > /dev/null

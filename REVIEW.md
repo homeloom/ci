@@ -45,6 +45,8 @@ severity:
       request text follow the same rules as the code.
 - [ ] Every `ci-allow:` comment is justified, and every `gitleaks:allow` is
       questioned.
+- [ ] No commit was force pushed away to hide data: a pushed commit stays
+      reachable on GitHub, so a leak is reported to a maintainer instead.
 
 ## 3. Open and generic design
 

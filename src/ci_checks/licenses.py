@@ -215,7 +215,7 @@ def install(
     the uv configuration of the checked out repository is ignored.
     """
     for requirement in requirements:
-        if requirement.lstrip().startswith("-"):
+        if requirement.lstrip().startswith("-") or any(c in requirement for c in "\r\n"):
             raise ValueError(f"Invalid manifest requirement: {requirement!r}")
     listing = target.parent / "manifest-requirements.txt"
     listing.write_text("".join(f"{line}\n" for line in requirements), encoding="utf-8")

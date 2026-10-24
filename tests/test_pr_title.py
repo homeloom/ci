@@ -5,7 +5,7 @@ from __future__ import annotations
 import pytest
 
 from ci_checks import pr_title
-from helpers import pr_event
+from helpers import EventWriter, pr_event
 
 TYPES = pr_title.DEFAULT_TYPES.split()
 
@@ -43,7 +43,7 @@ def test_invalid_titles(title: str, reason: str) -> None:
     assert reason in problem
 
 
-def test_main(event, capsys) -> None:
+def test_main(event: EventWriter, capsys: pytest.CaptureFixture[str]) -> None:
     event({})
     assert pr_title.main([]) == 0
     assert "Not a pull request event" in capsys.readouterr().out

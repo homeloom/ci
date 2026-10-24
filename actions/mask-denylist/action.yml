@@ -1,0 +1,14 @@
+name: Mask denylist
+description: >-
+  Mask the spellings of each denylisted term in the rest of the job log. Run
+  it as the first step of a job, before the checkout prints branch names. The
+  denylist is read from the PRIVACY_DENYLIST environment variable, which the
+  calling step sets from a secret.
+runs:
+  using: composite
+  steps:
+    - name: Mask denylisted terms
+      shell: bash
+      env:
+        PYTHONPATH: ${{ github.action_path }}/../../src
+      run: python3 -P -m ci_checks.privacy --mask-only

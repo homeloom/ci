@@ -21,8 +21,9 @@ checked and released.
 
 1. Open an issue first for anything larger than a small fix, so the design
    can be agreed before the work starts.
-2. Create a branch and open the pull request as a **draft**. CI does not run
-   on drafts, which saves runner minutes while the work is in progress.
+2. Create a branch and open the pull request as a **draft** right away. On
+   drafts only the quick hygiene checks run, which saves runner minutes while
+   the work is in progress and still catches personal data on every push.
 3. Give the pull request a [Conventional Commits](https://www.conventionalcommits.org/)
    title, such as `feat: add a sensor` or `fix(api): handle timeouts`. The
    title becomes the commit message when the pull request is squash merged.
@@ -30,6 +31,10 @@ checked and released.
 5. When the change is complete, mark the pull request as ready for review.
    CI runs once, and the **Report** check must pass before merging.
 6. Answer every review comment, either with a change or with an explanation.
+
+Pushed commits stay on GitHub even after a force push. If personal data or a
+secret was pushed, do not try to hide it: tell a maintainer, and revoke the
+secret.
 
 ## Tests and quality
 

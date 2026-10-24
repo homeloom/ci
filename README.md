@@ -32,14 +32,21 @@ A typical integration CI calls four workflows and ends with a **Report** job
 that needs all of them. Branch protection requires Report only, so adding or
 removing a job never requires a settings change.
 
-- Draft pull requests skip every job except Report, which fails in seconds
-  with "Draft pull request: CI was skipped". A skipped required check would
-  count as passed, so Report always runs and only passes when every job it
-  needs succeeded.
+- Draft pull requests only run the hygiene job, which takes seconds and
+  finds personal data as soon as it is pushed. Report then fails with
+  "Draft pull request: only the hygiene checks ran". A skipped required check
+  would count as passed, so Report always runs and only passes when every
+  job it needs succeeded.
 - Marking the pull request ready for review starts one full run.
 - Editing the title or body starts a new run, because the title becomes the
   squash commit message and both are checked for personal data.
-- Runs of the same pull request cancel each other.
+- Runs of the same pull request cancel each other. Runs on `main` never do,
+  so that every commit is checked.
+
+Push a branch only together with its draft pull request: a branch without
+one is not checked. A force push does not remove anything from GitHub, where
+the old commits stay reachable; if personal data or a secret was pushed,
+tell a maintainer instead.
 
 The composite actions in `actions/` can also be used on their own. The
 privacy and English actions read the history, so they need a checkout with
@@ -50,10 +57,11 @@ silently checking less.
 
 | Input | Default | Description |
 | --- | --- | --- |
-| `allowed-domains` | | Extra domains allowed in URLs. |
+| `allowed-domains` | | Extra domains allowed in URLs and noreply addresses. |
 | `privacy-exclude` | | Globs skipped by the generic personal data patterns. |
-| `require-denylist` | `true` | Fail when the `PRIVACY_DENYLIST` secret is empty. Fork pull requests only warn. |
+| `require-denylist` | `true` | Fail when the `PRIVACY_DENYLIST` secret is empty, including on fork pull requests. |
 | `english-exclude` | | Globs skipped by the language check. |
+| `english-allowed-words` | | Words the language check accepts, such as accented brand names. |
 | `license` | `MIT` | SPDX identifier the LICENSE file must match. |
 | `license-requirements` | | Extra runtime requirements files whose licenses are checked. |
 | `license-allowed` | | SPDX identifiers that replace the default allowed list. |
@@ -62,33 +70,46 @@ silently checking less.
 Secret: `PRIVACY_DENYLIST`, one term per line (lines starting with `#` are
 comments). Matching ignores case and accents, respects word boundaries and
 accepts any punctuation, underscore or line break between the words of a
-term, so `First Last` also matches `first_last` and `First-Last`. The common
-spellings of each term (as written, in lower, upper and title case, without
-accents, with underscores or hyphens) are masked in the job log before any
-other step runs.
+term, so `First Last` also matches `first_last` and `First-Last`. List only
+terms that never belong in a repository: not the GitHub usernames of
+maintainers, which appear in noreply addresses and attributions, since the
+denylist has no exceptions.
+
+The first step of the job masks the common spellings of each term (as
+written, in lower, upper and title case, without accents, with spaces,
+underscores, hyphens or dots between words) for the rest of the job log,
+before the checkout prints the branch names.
 
 The **Hygiene** job checks:
 
 - **Pull request title**: Conventional Commits, at most 100 characters.
-- **Secrets**: gitleaks over the whole history of the pull request head.
-- **Personal data** with generic patterns: private IP addresses, e-mail
-  addresses that are not noreply, phone numbers, URLs outside an allowlist,
-  home directory paths, MAC addresses, Zigbee and Thread device addresses
-  (EUI-64) and coordinates. They apply to:
+- **Secrets**: gitleaks over the whole history of the pull request head,
+  with the default rules. The action passes its own configuration and runs
+  outside the checkout, so a `.gitleaks.toml` or `.gitleaksignore` in the
+  repository has no effect.
+- **Personal data** with generic patterns: private and link-local IP
+  addresses, global IPv6 addresses, e-mail addresses that are not noreply,
+  phone numbers, URLs of any scheme whose host is outside an allowlist or is
+  a public IP address, home directory paths, MAC addresses, Zigbee and
+  Thread device addresses (EUI-64) and coordinates. They apply to:
   - every tracked text file and symbolic link target;
-  - every line added by the commits of the pull request or push, including
-    lines that a later commit removes, because those commits stay
-    reachable after the merge;
+  - every file written by the commits of the pull request or push,
+    including lines and files that a later commit removes, because those
+    commits stay reachable after the merge (merge commits count with the
+    lines they add themselves);
   - the messages of those commits;
   - the pull request title and body.
 - **Commit identities**: authors and committers of the whole history must
-  use noreply addresses.
-- **Denylist**: everything above, plus binary files up to 20 MB, file
-  paths, the commit authors, committers and messages of the whole history,
-  and the branch name.
+  use GitHub noreply addresses, or a `noreply` mailbox at an allowed domain.
+- **Denylist**: everything above, plus the readable strings of binary files,
+  file paths, the commit authors, committers and messages of the whole
+  history, and the branch name.
 - **English**: French text outside translation files, in files, new commit
   messages and the pull request title and body.
 - **Workflows**: actionlint with shellcheck.
+
+The first push of a branch, a force push and a manual run check every commit
+of the history as new.
 
 The **Licenses** job checks that the LICENSE file matches the expected
 license and that every runtime dependency (manifest `requirements` and
@@ -102,26 +123,36 @@ path segments are shown as `[redacted]`.
 
 A line that is not personal data despite matching a pattern can opt out of
 one category with a comment such as `# ci-allow: private-ip`. The categories
-are `private-ip`, `email`, `phone`, `url`, `home-path`, `mac`, `device-id`,
-`coordinates` and `french`. The denylist and gitleaks cannot be opted out of
-(gitleaks has its own `gitleaks:allow` comment, which reviewers must
-question).
+are `private-ip`, `public-ip`, `email`, `phone`, `url`, `home-path`, `mac`,
+`device-id`, `coordinates` and `french`. The denylist and gitleaks cannot be
+opted out of. gitleaks has its own `gitleaks:allow` comment; the privacy
+check warns about every added line that uses it, and reviewers must
+question it.
 
 Exemptions, kept narrow on purpose:
 
-- License files (`LICENSE*`, `LICENCE*`, `COPYING*`, `NOTICE*`) skip the
-  generic patterns, because license texts quote their authors' sites.
-- Commits authored by GitHub Apps such as Dependabot skip the generic
-  patterns for their added lines and messages, and their pull request body
-  skips them too, because these quote upstream release notes and carry
-  service addresses in trailers. The denylist still applies to them.
-- Fork pull requests do not receive secrets, so the denylist only warns
-  there.
+- License files (`LICENSE`, `LICENCE`, `COPYING` and `NOTICE`, with an
+  optional suffix such as `-APACHE` or `.md`) skip the generic patterns,
+  because license texts quote their authors' sites.
+- Dependabot commits skip the generic patterns for their added lines and
+  messages, and its pull request body skips them too, because these quote
+  upstream release notes and carry service addresses in trailers. In a pull
+  request this only applies when Dependabot opened it, since anyone can
+  write a bot address into a commit. The denylist still applies.
+- Fork pull requests do not receive secrets, so the denylist cannot run on
+  them: the check fails, and a maintainer pushes the branch to the
+  repository to run it.
 
-Limits: the generic patterns cannot recognize names, street addresses or
-public IP addresses, nor text inside images, archives or encoded data, and
-files larger than 20 MB are skipped with a warning. The denylist and the
-review cover what the patterns cannot.
+Limits:
+
+- The generic patterns cannot recognize names, street addresses or public
+  IPv4 addresses outside URLs (they look like version numbers), nor text in
+  images, archives or encoded data. The denylist and the review cover what
+  the patterns cannot.
+- In binary files, terms of four letters or less only count inside phrases
+  of several words (such as a title in image metadata), because random bytes
+  spell short words by chance.
+- Files larger than 20 MB are skipped with a warning.
 
 ### python-lint.yml
 

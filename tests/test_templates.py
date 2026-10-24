@@ -8,7 +8,8 @@ import pytest
 
 ROOT = Path(__file__).resolve().parent.parent
 COMMON = ROOT / "templates" / "common"
-# dependabot.yml differs on purpose: this repository also scans actions/.
+# dependabot.yml differs on purpose: its header points to the tools that
+# Dependabot cannot update in this repository.
 SHARED = sorted(
     path.relative_to(COMMON)
     for path in COMMON.rglob("*")

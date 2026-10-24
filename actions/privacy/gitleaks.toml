@@ -1,0 +1,7 @@
+# The gitleaks rules used by the privacy action: the default rules, nothing
+# allowlisted. The action passes this file explicitly, so a pull request
+# cannot weaken the scan with its own .gitleaks.toml.
+title = "Default rules"
+
+[extend]
+useDefault = true

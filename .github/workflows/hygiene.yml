@@ -6,6 +6,9 @@ name: Hygiene
 # reports every problem. The license check installs third party packages,
 # which may run their build code, so it runs in its own job that never
 # receives the denylist secret.
+#
+# Callers run this workflow on draft pull requests too: it takes seconds,
+# and personal data must be found as soon as it is pushed.
 
 on:
   workflow_call:
@@ -24,6 +27,10 @@ on:
         default: true
       english-exclude:
         description: Globs of files skipped by the language check.
+        type: string
+        default: ""
+      english-allowed-words:
+        description: Words the language check accepts, such as accented brand names.
         type: string
         default: ""
       license:
@@ -57,6 +64,12 @@ jobs:
     permissions:
       contents: read
     steps:
+      # Before the checkout, which prints the name of every branch.
+      - name: Mask denylisted terms
+        uses: $/actions/mask-denylist
+        env:
+          PRIVACY_DENYLIST: ${{ secrets.PRIVACY_DENYLIST }}
+
       - name: Check out
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -82,6 +95,7 @@ jobs:
         uses: $/actions/english
         with:
           exclude: ${{ inputs.english-exclude }}
+          allowed-words: ${{ inputs.english-allowed-words }}
 
       - name: Install actionlint
         if: ${{ !cancelled() }}

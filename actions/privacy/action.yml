@@ -40,6 +40,30 @@ runs:
       if: ${{ !cancelled() }}
       shell: bash
       env:
+        CONFIG: ${{ github.action_path }}/gitleaks.toml
         # The history of the pull request head, or of the pushed commit.
         TIP: ${{ github.event.pull_request.head.sha || 'HEAD' }}
-      run: gitleaks git --no-banner --redact --verbose --log-opts="$TIP" .
+      run: |
+        # gitleaks also reads .gitleaksignore from the scanned tree and the
+        # working directory, so it runs from an empty directory on the git
+        # directory itself: the files of a pull request cannot hide a finding.
+        git_dir="$(git rev-parse --absolute-git-dir)"
+        work="$(mktemp -d)"
+        report="${work}.json"
+        cd "$work"
+        gitleaks git --no-banner --redact --exit-code 0 --config "$CONFIG" \
+          --gitleaks-ignore-path "$work" --log-opts="$TIP" \
+          --report-format json --report-path "$report" "$git_dir"
+        # Report where each secret is, without the author fields that
+        # --verbose would print.
+        jq -r 'def prop: gsub("%"; "%25") | gsub("\r"; "%0D") | gsub("\n"; "%0A")
+            | gsub(":"; "%3A") | gsub(","; "%2C");
+          .[] | "::error file=\(.File | prop),line=\(.StartLine)::Possible secret"
+            + " (\(.RuleID)) added by commit \(.Commit[0:12]). Revoke it, then remove it"
+            + " from the history."' "$report"
+        count="$(jq length "$report")"
+        if [[ "$count" -gt 0 ]]; then
+          echo "Secrets: ${count} finding(s)."
+          exit 1
+        fi
+        echo "Secrets: no problem found."

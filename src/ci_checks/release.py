@@ -39,12 +39,14 @@ def read_version(path: Path) -> str:
     """Return the version declared in a manifest, app config, pyproject or text file."""
     text = path.read_text(encoding="utf-8")
     if path.suffix == ".json":
-        version = json.loads(text).get("version")
+        data = json.loads(text)
+        version = data.get("version") if isinstance(data, dict) else None
     elif path.suffix in {".yaml", ".yml"}:
         match = _YAML_VERSION.search(text)
         version = match.group(1) if match else None
     elif path.suffix == ".toml":
-        version = tomllib.loads(text).get("project", {}).get("version")
+        project = tomllib.loads(text).get("project")
+        version = project.get("version") if isinstance(project, dict) else None
     else:
         version = text.strip().splitlines()[0] if text.strip() else None
     if not isinstance(version, str) or not VERSION.match(version):
@@ -54,7 +56,8 @@ def read_version(path: Path) -> str:
 
 def release_notes(changelog: str, version: str) -> str:
     """Return the body of the changelog section for a version."""
-    heading = re.compile(rf"^##\s+\[?v?{re.escape(version)}\]?(?:\s|$)")
+    # "## [1.2.0] - 2026-01-31", "## v1.2.0", or "## [1.2.0](<compare link>) (date)".
+    heading = re.compile(rf"^##\s+\[?v?{re.escape(version)}\]?(?:\([^)\s]*\))?(?:\s|$)")
     lines = changelog.splitlines()
     for index, line in enumerate(lines):
         if heading.match(line):

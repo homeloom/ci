@@ -23,6 +23,10 @@ CHANGELOG = """# Changelog
 
 - Initial release.
 
+## [1.0.1](https://github.com/owner/repo/compare/v1.0.0...v1.0.1) (2026-01-01)
+
+- A fix.
+
 ## [1.0.0]
 """
 
@@ -51,6 +55,8 @@ def test_read_version(tmp_path: Path, name: str, content: str) -> None:
     [
         ("manifest.json", json.dumps({"domain": "demo"})),
         ("config.yaml", "name: Demo\n"),
+        ("manifest.json", "[]"),
+        ("pyproject.toml", 'project = "demo"\n'),
         ("VERSION", ""),
         ("VERSION", "latest\n"),
     ],
@@ -70,13 +76,16 @@ def test_find_version_file(tmp_path: Path) -> None:
 def test_release_notes() -> None:
     assert release.release_notes(CHANGELOG, "1.2.0") == "### Added\n\n- A sensor.\n"
     assert release.release_notes(CHANGELOG, "1.1.0") == "- Initial release.\n"
+    assert release.release_notes(CHANGELOG, "1.0.1") == "- A fix.\n"
+    with pytest.raises(release.ReleaseError, match="no section"):
+        release.release_notes(CHANGELOG, "1.0")
     with pytest.raises(release.ReleaseError, match="empty"):
         release.release_notes(CHANGELOG, "1.0.0")
     with pytest.raises(release.ReleaseError, match="no section"):
         release.release_notes(CHANGELOG, "9.9.9")
 
 
-def test_main(tmp_path: Path, capsys) -> None:
+def test_main(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     write(tmp_path / "custom_components/demo/manifest.json", json.dumps({"version": "2.0.0b1"}))
     write(tmp_path / "CHANGELOG.md", "## [2.0.0b1]\n\n- Beta.\n")
     root = ["--root", str(tmp_path)]

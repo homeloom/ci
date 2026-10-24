@@ -47,7 +47,8 @@ for tool in ${TOOLS}; do
       ;;
   esac
   archive="${work_dir}/${tool}.tar.gz"
-  curl --fail --silent --show-error --location --retry 3 --output "$archive" "$url"
+  curl --fail --silent --show-error --location --retry 3 \
+    --connect-timeout 10 --max-time 120 --output "$archive" "$url"
   echo "${sha256}  ${archive}" | sha256sum --check --quiet
   tar -xzf "$archive" -C "$work_dir" "$member"
   install -m 0755 "${work_dir}/${member}" "${bin_dir}/${tool}"
