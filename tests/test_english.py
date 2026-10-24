@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import unicodedata
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
@@ -11,6 +13,12 @@ from ci_checks._common import Reporter
 from helpers import DEPENDABOT, EventWriter, Repo, pr_event
 
 Capture = pytest.CaptureFixture[str]
+
+
+def strip_accents(text: str) -> str:
+    """Return text written without accents, as people often type French."""
+    decomposed = unicodedata.normalize("NFD", text)
+    return "".join(char for char in decomposed if not unicodedata.combining(char))
 
 
 @pytest.mark.parametrize(
@@ -29,10 +37,32 @@ Capture = pytest.CaptureFixture[str]
         "# Gerer les erreurs reseau",
         "la mise a jour des donnees",
         "Les valeurs par defaut",
+        # Elisions are split, so that the elided word is checked too.
+        "fix: gere l'erreur 401",
+        "fix: l'utilisateur est deconnecte",
+        "fix: unite incorrecte pour l'energie",
+        "docs: precise qu'il faut redemarrer",
+        "fix: entites desactivees par defaut",
+        "feat: ajoutee aux options avancees",
+        "fix: options nombreuses et dangereuses",
+        "fix: l'API renvoie une liste vide",
+        "Lorsqu'on relance, rien ne change",
     ],
 )
 def test_french_detected(text: str) -> None:
     assert english.looks_french(text)
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Récupère l'état du thermostat",
+        "fix: réponse vide de l'API",
+        "feat: traduction des états",
+    ],
+)
+def test_decomposed_accents_are_seen(text: str) -> None:
+    assert english.looks_french(unicodedata.normalize("NFD", text))
 
 
 @pytest.mark.parametrize(
@@ -53,6 +83,43 @@ def test_french_detected(text: str) -> None:
         "The pendant light in the salon",
         "Smith et al. 2020",
         "It verifies the digests and modifies the temps",
+        # Language tags and country codes.
+        'DEFAULT_LANGUAGE = "de-DE"',
+        '"de-de": "Germany",',
+        "en-au",
+        'SUPPORTED_REGIONS = ["AU", "DE", "FR"]',
+        'REGIONS = ["us", "eu", "il", "au"]',
+        # Words in capitals are codes and acronyms.
+        "AUX ILS EST SI",
+        '"aux": "AUX",',
+        'self._source = self.send_command("SI?").removeprefix("SI")',
+        # English words that are also French.
+        "# Build the PKCE code verifier",
+        'raise InvalidAuth("Invalid code verifier")',
+        "The user chose a device",
+        "ONT ont",
+        # An accent alone proves nothing: capitalized accented words are names.
+        "Zürich",
+        "Türkiye",
+        "Réunion",
+        "Data provided by Météo-France",
+        "Côte d'Ivoire",
+        '"CI": "Côte d\'Ivoire",',
+        '"brand": "Bluéfinch",',
+        "Weather data for Zürich, Genève and Réunion",
+        "the bluéfinch hub",
+        # Prefixes, slugs, URLs and code are not sentences.
+        "The relay must de-energize before the motor reverses.",
+        "Models: nous-hermes2, nous-hermes2-mixtral",
+        "See https://example.org/de/la/page-de-test for the details.",
+        "value_fn=lambda le: le.date",
+        "aux = aux[aux_sort]",
+        "data = \"(S'V6' S'b'\"",
+        "# d'oh, d'oh, the cache was stale",
+        "A unique, oblique technique",
+        "import xml.etree.ElementTree as ET",
+        '"""Provides diagnostics for Aussie Broadband."""',
+        '"name": "Horse riding"',
     ],
 )
 def test_english_accepted(text: str) -> None:
@@ -60,8 +127,11 @@ def test_english_accepted(text: str) -> None:
 
 
 def test_allowed_words() -> None:
-    assert english.looks_french("Weather from Météo-France")
-    assert not english.looks_french("Weather from Météo-France", frozenset({"météo"}))
+    # Brand names made of French words, written as the brand writes them.
+    assert english.looks_french('"name": "Bien-Être Connect"')
+    assert not english.looks_french('"name": "Bien-Être Connect"', frozenset({"bien-être"}))
+    assert english.looks_french("fix: handle Écran's dimmer")
+    assert not english.looks_french("fix: handle Écran's dimmer", frozenset({"écran"}))
 
 
 @pytest.mark.parametrize(
@@ -77,11 +147,37 @@ def test_allowed_words() -> None:
         ("app/locales/fr/messages.json", True),
         ("app/locales/en/messages.json", False),
         ("po/fr.po", True),
+        ("po/en.po", False),
         ("README.fr.md", True),
         ("docs/guide.pt-BR.md", True),
         ("README.en.md", False),
         ("docs/setup.py.md", False),
         ("src/demo.py", False),
+        ("custom_components/demo/frontend/src/localize/languages/fr.json", True),
+        ("custom_components/demo/frontend/src/localize/languages/en.json", False),
+        ("i18n/fr.json", True),
+        ("locale/fr.json", True),
+        ("locale/fr/LC_MESSAGES/messages.po", True),
+        ("locale/messages.pot", True),
+        ("lang/zh-Hant.json", True),
+        ("lang/es-419.yaml", True),
+        ("README_fr.md", True),
+        ("README-fr.md", True),
+        ("README-pt_BR.md", True),
+        ("README_en.md", False),
+        ("README.ca.md", True),
+        ("README.cy.md", True),
+        ("docs/fr/index.md", True),
+        ("docs/fr/guide/setup.md", True),
+        ("docs/en/index.md", False),
+        ("docs/api/index.md", False),
+        ("docs/index.md", False),
+        # Only data and documentation files are translations.
+        ("src/locales/loader.py", False),
+        ("i18n/index.ts", False),
+        ("docs/fr/conf.py", False),
+        ("guide-fr.md", False),
+        ("LICENSE", False),
     ],
 )
 def test_is_translation(path: str, expected: bool) -> None:
@@ -100,6 +196,36 @@ def test_check_files(repo: Repo, capsys: Capture) -> None:
     assert "file=a.py,line=2::Line looks French (or another language" in capsys.readouterr().out
 
 
+def test_english_ui_text_needs_no_pragma(repo: Repo) -> None:
+    # JSON cannot hold a ci-allow comment, so English UI text must pass as it is.
+    strings = """{
+  "config": {
+    "step": {"user": {"title": "Connect to the hub", "data": {"host": "Host"}}},
+    "error": {"cannot_connect": "Failed to connect"}
+  },
+  "selector": {
+    "source": {"options": {"aux": "AUX", "hdmi_1": "HDMI 1"}},
+    "region": {
+      "options": {
+        "de-de": "Germany",
+        "en-au": "Australia",
+        "tr-tr": "Türkiye",
+        "ci": "Côte d'Ivoire",
+        "re": "Réunion",
+        "zurich": "Zürich"
+      }
+    }
+  }
+}
+"""
+    paths = ["custom_components/demo/strings.json", "custom_components/demo/translations/en.json"]
+    for path in paths:
+        repo.write(path, strings)
+    reporter = Reporter("English")
+    english.check_files(repo.root, paths, reporter)
+    assert reporter.count == 0
+
+
 def test_check_messages(repo: Repo, capsys: Capture) -> None:
     base = repo.commit("chore: initial")
     repo.commit("fix: corrige le capteur")
@@ -115,6 +241,34 @@ def test_check_messages(repo: Repo, capsys: Capture) -> None:
     assert "message looks French" in out
     assert "Pull request title looks French." in out
     assert "Pull request body looks French." in out
+
+
+def test_trailers_naming_people_are_skipped(repo: Repo, capsys: Capture) -> None:
+    base = repo.commit("chore: initial")
+    # The message GitHub writes when it squashes the commits of several authors.
+    head = repo.commit(
+        "feat: add a humidity sensor (#12)\n\n"
+        "* feat: add a humidity sensor\n\n"
+        "---------\n\n"
+        "Co-authored-by: Bluefinch de la Roche du Lac <2+bluefinch@users.noreply.github.com>\n"
+        "Reviewed-by: Bluefinch\n du Lac des Bois <4+example@users.noreply.github.com>\n"
+        "Signed-off-by: José García <3+example@users.noreply.github.com>"
+    )
+    reporter = Reporter("English")
+    english.check_messages(repo.root, pr_event(base, head), reporter)
+    assert reporter.count == 0
+    # Other trailers hold prose, and the same lines in the body are checked.
+    breaking = repo.commit(
+        "feat!: drop the cloud API\n\nBREAKING-CHANGE: le capteur ne fonctionne plus"
+    )
+    in_body = repo.commit(
+        "fix: add a sensor\n\nCo-authored-by: de la Roche du Lac\n\nThanks for the review."
+    )
+    english.check_messages(repo.root, pr_event(head, in_body), reporter)
+    out = capsys.readouterr().out
+    assert reporter.count == 2
+    assert f"Commit {breaking[:12]}: message looks French." in out
+    assert f"Commit {in_body[:12]}: message looks French." in out
 
 
 def test_dependabot_commits_are_skipped(repo: Repo) -> None:
@@ -147,11 +301,13 @@ def test_dependabot_body_is_skipped(repo: Repo) -> None:
 def test_main(repo: Repo, event: EventWriter, capsys: Capture) -> None:
     repo.write("a.py", "# Fetch the value\n")
     repo.write("vendor/b.py", "# Récupère la valeur\n")
-    repo.write("manifest.json", '{"name": "Météo-France"}\n')
+    repo.write("manifest.json", '{"name": "Bien-Être Connect"}\n')
     repo.commit("feat: add a")
     event({})
     root = ["--root", str(repo.root)]
-    assert english.main([*root, "--exclude", "vendor/*", "--allowed-words", "Météo"]) == 0
+    # Allowed words given with decomposed accents match the text all the same.
+    allowed = unicodedata.normalize("NFD", "Bien-Être")
+    assert english.main([*root, "--exclude", "vendor/*", "--allowed-words", allowed]) == 0
     assert english.main(root) == 1
     assert "English: 2 problem(s) found." in capsys.readouterr().out
 
@@ -166,3 +322,518 @@ def test_main_rejects_shallow_clones(
     event({})
     assert english.main(["--root", str(clone)]) == 1
     assert "fetch-depth: 0" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(
+    "form",
+    [
+        pytest.param(lambda text: text, id="accents"),
+        pytest.param(strip_accents, id="no-accents"),
+        pytest.param(lambda text: unicodedata.normalize("NFD", text), id="decomposed"),
+    ],
+)
+def test_french_corpus(form: Callable[[str], str]) -> None:
+    lines = FRENCH_CORPUS.splitlines()
+    missed = [form(line) for line in lines if not english.looks_french(form(line))]
+    # Short lines written without accents can hold no French word at all.
+    assert len(missed) <= len(lines) // 20, missed
+
+
+def test_english_corpus() -> None:
+    lines = [line for line in ENGLISH_CORPUS.splitlines() if line]
+    assert [line for line in lines if english.looks_french(line)] == []
+
+
+# Corpora written for these tests: commit messages, code, documentation and
+# UI strings in the style of Home Assistant integrations.
+FRENCH_CORPUS = '''\
+fix: corrige le calcul de la consommation
+feat: ajoute un capteur de luminosité
+fix: gère l'expiration du jeton
+docs: met à jour le guide d'installation
+refactor: simplifie la gestion des erreurs
+feat: prise en charge des thermostats connectés
+fix: évite un plantage au démarrage
+chore: supprime le code inutilisé
+test: ajoute des tests pour le coordinateur
+fix: la valeur du capteur reste à zéro
+feat: nouvel écran de configuration
+fix: l'intégration ne se recharge plus
+docs: précise les prérequis
+feat: option pour choisir l'intervalle de mise à jour
+fix: mauvaise unité pour la température extérieure
+ci: lance les tests sur chaque branche
+fix: reconnexion automatique après une coupure réseau
+feat: affiche le niveau de batterie
+refactor: déplace les constantes dans un fichier dédié
+fix: les volets ne s'ouvrent pas entièrement
+feat: support du mode éco pour les radiateurs
+fix: plantage quand la réponse est vide
+docs: explique comment obtenir la clé d'API
+style: renomme les variables mal nommées
+perf: réduit le nombre de requêtes
+fix: n'affiche plus d'avertissement inutile
+feat: ajout d'un service pour redémarrer l'appareil
+fix: traduction manquante pour l'erreur de connexion
+chore: nettoyage des imports
+fix: arrondi incorrect de la puissance
+feat: détection de présence par pièce
+test: vérifie le comportement hors ligne
+fix: délai d'attente trop court
+docs: corrige des fautes de frappe
+feat: gestion des scènes
+fix: entités désactivées par défaut
+refactor: utilise le coordinateur partagé
+fix: qu'il y ait ou non une connexion
+feat: compteur d'énergie journalier
+fix: icône incorrecte pour la fenêtre ouverte
+build: met à jour les dépendances
+fix: ignore les mesures aberrantes
+feat: notifications lorsque la porte reste ouverte
+fix: sauvegarde des réglages avant la mise à jour
+docs: ajoute une capture de l'écran d'accueil
+fix: chaîne de caractères non traduite
+feat: choix de la langue des messages
+fix: plusieurs appareils avec le même nom
+chore: passe à la version suivante
+fix: crash si l'hôte est injoignable
+feat: historique des alarmes
+fix: boucle infinie lors de la synchronisation
+fix: le minuteur ne s'arrête jamais
+feat: nouveau capteur pour la qualité de l'air
+fix: mauvaise conversion des degrés
+# Récupère l'état actuel de l'appareil
+# On attend que la connexion soit établie
+"""Retourne la liste des capteurs disponibles."""
+_LOGGER.debug("Impossible de joindre le serveur")
+raise UpdateFailed("Réponse invalide du serveur")
+# TODO : gérer le cas où le jeton a expiré
+Cette intégration permet de piloter les radiateurs depuis Home Assistant.
+## Configuration avancée
+Renseignez l'adresse de la passerelle puis validez.
+# Valeur par défaut si le capteur ne répond pas
+"description": "Choisissez la pièce de l'appareil"
+# Convertit la puissance en kilowatts
+- Ajout d'un capteur de qualité d'air
+Les mises à jour sont récupérées toutes les cinq minutes.
+# Ne pas appeler cette fonction dans la boucle d'événements
+"""Classe de base pour les entités de l'intégration."""
+_LOGGER.warning("Le délai est dépassé, nouvel essai dans %s secondes", delay)
+# Si la valeur est absente, on garde l'ancienne
+Pour installer l'intégration, copiez le dossier dans custom_components.
+# Liste des modes supportés par le thermostat
+msg = "Erreur lors de la lecture du fichier"
+# Évite de remplir les journaux
+* Correction de l'affichage de la température
+Merci de décrire le problème rencontré.
+Cette PR ajoute la prise en charge des volets roulants.
+# Attendre un peu avant de réessayer
+# Le serveur renvoie parfois une liste vide
+"""Teste la configuration avec des identifiants erronés."""
+# Il faut convertir en watts avant d'envoyer
+# Les heures sont en temps universel
+'''
+ENGLISH_CORPUS = '''\
+"""The Bluefinch integration."""
+from __future__ import annotations
+import logging
+from datetime import timedelta
+from typing import Any
+from homeassistant.config_entries import ConfigEntry
+from homeassistant.const import CONF_HOST, CONF_PASSWORD, Platform
+from homeassistant.core import HomeAssistant, callback
+from homeassistant.exceptions import ConfigEntryAuthFailed, ConfigEntryNotReady
+from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
+_LOGGER = logging.getLogger(__name__)
+DOMAIN = "bluefinch"
+PLATFORMS: list[Platform] = [Platform.BINARY_SENSOR, Platform.CLIMATE, Platform.SENSOR]
+SCAN_INTERVAL = timedelta(seconds=30)
+DEFAULT_PORT = 8443
+async def async_setup_entry(hass: HomeAssistant, entry: BluefinchConfigEntry) -> bool:
+"""Set up Bluefinch from a config entry."""
+coordinator = BluefinchCoordinator(hass, entry)
+await coordinator.async_config_entry_first_refresh()
+entry.runtime_data = coordinator
+await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
+return True
+async def async_unload_entry(hass: HomeAssistant, entry: BluefinchConfigEntry) -> bool:
+"""Unload a config entry."""
+return await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
+class BluefinchCoordinator(DataUpdateCoordinator[dict[str, Any]]):
+"""Fetch data from the Bluefinch hub."""
+def __init__(self, hass: HomeAssistant, entry: BluefinchConfigEntry) -> None:
+"""Initialize the coordinator."""
+super().__init__(hass, _LOGGER, config_entry=entry, name=DOMAIN, update_interval=SCAN_INTERVAL)
+async def _async_update_data(self) -> dict[str, Any]:
+"""Fetch the latest state of every device."""
+except TimeoutError as err:
+raise UpdateFailed("Timed out while fetching data from the hub") from err
+except AuthenticationError as err:
+raise ConfigEntryAuthFailed("The password was rejected") from err
+except ConnectionError as err:
+raise ConfigEntryNotReady(f"Cannot reach the hub at {host}") from err
+_attr_has_entity_name = True
+_attr_translation_key = "outdoor_temperature"
+_attr_native_unit_of_measurement = UnitOfTemperature.CELSIUS
+_attr_device_class = SensorDeviceClass.TEMPERATURE
+_attr_state_class = SensorStateClass.MEASUREMENT
+@property
+def native_value(self) -> float | None:
+"""Return the current temperature."""
+return self.coordinator.data.get("temp")
+# The hub reports the value in tenths of a degree.
+# Older firmware omits the field, so fall back to None.
+_LOGGER.debug("Received %s devices from the hub", len(devices))
+_LOGGER.warning("Device %s did not answer, retrying in %s seconds", device_id, delay)
+_LOGGER.error("Unexpected response from the hub: %s", response.status)
+"""Handle the initial step."""
+errors: dict[str, str] = {}
+errors["base"] = "cannot_connect"
+errors["base"] = "invalid_auth"
+_LOGGER.exception("Unexpected exception")
+errors["base"] = "unknown"
+return self.async_show_form(step_id="user", data_schema=STEP_USER_DATA_SCHEMA, errors=errors)
+await self.async_set_unique_id(info["serial"])
+self._abort_if_unique_id_configured()
+return self.async_create_entry(title=info["name"], data=user_input)
+LANGUAGES = ["de", "en", "es", "fr", "it", "nl", "pl"]
+SUPPORTED_REGIONS = ["AU", "DE", "FR", "GB", "US"]
+REGIONS = ["us", "eu", "il", "au"]
+DEFAULT_LANGUAGE = "de-DE"
+VOICES = {"de-DE": "voice_a", "en-AU": "voice_b", "fr-FR": "voice_c"}
+SUPPORTED_LOCALES = ["de-de", "en-au", "en-gb", "fr-ca", "pt-br"]
+# Build the PKCE code verifier and its challenge.
+code_verifier = secrets.token_urlsafe(64)
+"""Return the code verifier for the authorization request."""
+raise InvalidAuth("Invalid code verifier")
+CURRENCIES = ["AUD", "EUR", "ILS", "USD"]
+# The user chose a device that is already configured.
+"""Handle the step where the user chose the account."""
+if source == "aux":
+SOURCES = {"aux": "AUX", "hdmi1": "HDMI 1", "optical": "Optical"}
+self._source = self.send_command("SI?").removeprefix("SI")
+HVAC_MODES = [HVACMode.OFF, HVACMode.HEAT, HVACMode.AUTO]
+# Fall back to the default if the hub does not support the option.
+# Values above 100 are an error code, not a reading.
+# Round to one decimal, as the display does.
+return round(value * 9 / 5 + 32, 1)
+if not self.coordinator.last_update_success:
+return False
+"""Representation of a Bluefinch light."""
+await self.coordinator.async_request_refresh()
+# Pendant lights report their state through the parent fixture.
+# Debounce the button so that a long press is not reported twice.
+# See RFC 6749, section 4.1.
+# A tuple of (key, unit, device class) for each sensor.
+elif unit == "%":
+assert result["type"] is FlowResultType.CREATE_ENTRY
+assert result["data"] == {CONF_HOST: "hub.example.com", CONF_PASSWORD: "test-password"}
+mock_client.get_status.side_effect = TimeoutError
+with patch("custom_components.bluefinch.config_flow.Client.login", return_value=True):
+@pytest.fixture
+def mock_setup_entry() -> Generator[AsyncMock]:
+"""Override async_setup_entry."""
+"""Test we get the form."""
+"""Test we handle invalid auth."""
+"""Test we handle cannot connect error."""
+"""Test the sensor states match the snapshot."""
+await hass.async_block_till_done()
+assert hass.states.get("sensor.living_room_temperature").state == "21.5"
+assert len(mock_setup_entry.mock_calls) == 1
+freezer.tick(timedelta(minutes=5))
+async_fire_time_changed(hass)
+"""Fixtures for the Bluefinch tests."""
+# Pour the descaler into the tank before starting the cleaning cycle.
+CONF_ENTREE_LIGHT = "entree_light"
+# Les Paul mode sets the equalizer of the speaker to a warm profile.
+# Use the De Morgan form so that the condition reads better.
+# The La Crosse protocol sends one packet per minute.
+# Compute the dew point with the Magnus formula.
+# Matches the model numbers of the Le Mans series.
+# Vis-à-vis the old API, the new one returns ISO dates.
+# Café mode keeps the water hot between two cups.
+# A naïve datetime is interpreted as UTC.
+# The fiancé chime is a joke name from the vendor's firmware.
+# Use a façade so that tests can swap the client.
+# Ugly, but the vendor's API offers nothing better.
+# The temperature est. value is a forecast, not a reading.
+# Convert SI units to the imperial system when needed.
+# The ONT reports the optical power in dBm.
+ONT_STATUS = "ont_status"
+# Ad hoc mode is used when the hub has no network yet.
+# De facto standard for these devices is Modbus TCP.
+# Per se this is not an error, so only log a debug message.
+# Et al. is how the datasheet credits the authors.
+# The relay must de-energize before the motor reverses.
+# Mark the entity as unavailable rather than raising.
+# Entities are created once per device, not per channel.
+@callback
+def _handle_coordinator_update(self) -> None:
+"""Handle updated data from the coordinator."""
+self._attr_is_on = self.coordinator.data[self._device_id]["on"]
+self.async_write_ha_state()
+async def async_turn_on(self, **kwargs: Any) -> None:
+"""Turn the light on."""
+brightness = kwargs.get(ATTR_BRIGHTNESS, 255)
+await self._client.set_level(self._device_id, round(brightness / 255 * 100))
+async def async_turn_off(self, **kwargs: Any) -> None:
+"""Turn the light off."""
+device_info = DeviceInfo(identifiers={(DOMAIN, serial)}, manufacturer="Bluefinch", model=model)
+"""Return diagnostics for a config entry."""
+return async_redact_data(entry.data, TO_REDACT)
+TO_REDACT = {CONF_PASSWORD, "serial", "token"}
+"title": "Connect to the hub",
+"description": "Enter the host name or IP address of your hub.",
+"host": "Host",
+"password": "Password",
+"cannot_connect": "Failed to connect",
+"invalid_auth": "Invalid authentication",
+"unknown": "Unexpected error",
+"already_configured": "Device is already configured",
+"reauth_successful": "Re-authentication was successful",
+"reconfigure_successful": "Re-configuration was successful",
+"name": "Outdoor temperature"
+"name": "Filter life remaining"
+"name": "Water level"
+"name": "Boost mode"
+"auto": "Auto",
+"eco": "Eco",
+"boost": "Boost",
+"aux": "AUX",
+"hdmi_1": "HDMI 1",
+"de-de": "Germany",
+"en-au": "Australia",
+"fr-fr": "France",
+"tr-tr": "Türkiye",
+"CI": "Côte d'Ivoire",
+"RE": "Réunion",
+"CH": "Switzerland",
+"zurich": "Zürich",
+"host": "The host name or IP address of your Bluefinch hub.",
+"message": "The device {name} is unavailable."
+"title": "The Bluefinch cloud API is deprecated",
+"description": "Remove the entry and add it again to switch to the local API.",
+"scan_interval": "Update interval (seconds)",
+"mode": "Operating mode",
+"chime": "Chime",
+"quiet": "Quiet",
+"standard": "Standard",
+"turbo": "Turbo",
+"description": "Choose the rooms that the robot cleans first.",
+"title": "Bluefinch options",
+"data_description": {
+"name": "Café mode",
+"name": "Entrée light",
+"name": "Pendant light",
+"name": "Salon speaker",
+"name": "Bureau lamp"
+"name": "PM2.5"
+"brand": "Bluéfinch",
+"title": "Data provided by Météo-France",
+"en": "English",
+"de": "German",
+"fr": "French",
+"la": "Latin",
+"le": "Low energy",
+"medium": "Medium",
+"high": "High",
+"off": "Off",
+"on": "On",
+"low": "Low",
+"error": "Error",
+"idle": "Idle",
+"cleaning": "Cleaning",
+"returning": "Returning to dock",
+"paused": "Paused",
+"docked": "Docked",
+"set_mode": {
+"name": "Set mode",
+"description": "Sets the operating mode of the thermostat.",
+"fields": {
+"duration": "Duration",
+"description": "How long the boost lasts, in minutes.",
+"unit_of_measurement": "min",
+"exceptions": {
+"message": "Could not send the command to {device}: {error}"
+"issues": {
+# Bluefinch
+Custom integration for Bluefinch smart thermostats.
+## Installation
+1. Install HACS if you have not already.
+2. Search for "Bluefinch" and install it.
+3. Restart Home Assistant.
+## Configuration
+Go to **Settings** > **Devices & services** and select **Add integration**.
+The integration polls the hub every 30 seconds.
+## Known limitations
+- Only one hub per account is supported.
+- The cloud API does not report the filter state.
+- Schedules created in the vendor app are not shown.
+## Supported devices
+| Model | Supported | Notes |
+| --- | --- | --- |
+| BF-100 | Yes | Firmware 2.1 or later |
+| BF-200 | Partly | No humidity sensor |
+Data provided by Météo-France.
+Supports the de-DE, en-AU, en-GB and fr-FR voices.
+The pendant lamp in the salon dims to 30 percent at night.
+## Removing the integration
+This integration follows the standard integration removal process.
+## Troubleshooting
+If the hub does not appear, check that it is on the same network as Home Assistant.
+Enable debug logging and attach the log to your issue.
+## Contributing
+Read CONTRIBUTING.md before opening a pull request.
+## License
+This project is released under the MIT License.
+The coordinator fetches every device in one request, so the interval does not grow.
+Options can be changed later from the integration page.
+The thermostat entity exposes the heat, cool and auto modes.
+Brightness is scaled from 0 to 255 in Home Assistant and from 0 to 100 on the device.
+The energy sensor is a total, suitable for the energy dashboard.
+Use the `bluefinch.set_mode` action to change the mode from an automation.
+A reauthentication flow starts when the password changes.
+The hub must run firmware 2.0 or later.
+Only the local API is used; no cloud account is needed.
+Requests time out after ten seconds.
+### Example automation
+action: bluefinch.set_mode
+target:
+entity_id: climate.living_room
+data:
+mode: eco
+alias: Boost the heating in the morning
+trigger: time
+at: "06:30:00"
+## Changelog
+### Added
+- Humidity sensor for the BF-200.
+- Reconfigure flow to change the host.
+### Fixed
+- The boost switch no longer flips back after a refresh.
+- Timeouts are reported as unavailable instead of an error.
+### Changed
+- The minimum Home Assistant version is now 2025.1.
+### Removed
+- The YAML configuration, deprecated since 1.2.
+Thanks to the testers who reported the firmware 2.3 issue.
+It works with the La Crosse and Bluefinch weather stations.
+The device speaks the Le Mans protocol variant.
+See the De Morgan rule for the reasoning.
+The resume button continues the program where it stopped.
+The rendezvous point of the robot is its dock.
+The genre field is empty for podcasts.
+The menu shows an entrée, a main course and a dessert.
+Set la and le in the config to enable the experimental modes.
+It verifies the digests and modifies the temps folder.
+This is on par with the upstream library.
+The ILS, EUR and USD currencies are supported.
+The SI unit of power is the watt.
+AUX, HDMI and optical inputs are listed as sources.
+Weather data for Zürich, Genève and Réunion is available.
+Côte d'Ivoire and Türkiye use their own region codes.
+The Bluéfinch app must be closed while the integration runs.
+feat: add a humidity sensor
+fix: handle timeouts when the hub reboots
+docs: explain how to find the API key
+chore(deps): bump aiohttp from 3.11.11 to 3.11.12
+refactor: move the constants into const.py
+test: cover the reauthentication flow
+fix(sensor): report None while the device is offline
+ci: run the tests on Python 3.13
+feat!: drop support for firmware 1.x
+perf: reuse the shared aiohttp session
+style: sort the imports
+build: pin the hub library
+fix: chose the wrong unit for the outdoor sensor
+fix: store the PKCE code verifier between steps
+feat: add the AUX input to the source list
+fix: map the ILS currency code
+feat: support the de-DE and en-AU locales
+fix: keep the entrée light on after a restart
+fix: round the power to one decimal
+feat: add a reconfigure flow
+fix: avoid blocking the event loop when reading the certificate
+docs: describe the supported devices
+chore: release 1.4.0
+fix: ignore readings above the sensor range
+feat: expose the filter life as a sensor
+fix: do not log the token
+refactor: split the client into its own package
+test: add snapshot tests for the sensors
+docs: fix typos in the README
+fix: use the device serial as the unique ID
+feat: add diagnostics
+fix: retry once after a connection reset
+ci: pin the actions by commit SHA
+chore: update the issue templates
+feat: support the BF-200 thermostat
+fix: translate the error when the hub is busy
+docs: document the boost action
+fix: mark the entities unavailable when the hub is offline
+feat: add a binary sensor for the window detection
+Revert "feat: add a humidity sensor"
+This reverts commit 4f2a9c1.
+The humidity sensor reports wrong values on firmware 2.3.
+Merge branch 'main' into feature/humidity
+Merge pull request #12 from bluefinch/fix-timeouts
+Signed-off-by: octocat <1+octocat@users.noreply.github.com>
+Co-authored-by: hubot <2+hubot@users.noreply.github.com>
+The hub closes idle connections after 60 seconds, so the client now reconnects on demand.
+Older firmware sends the temperature as a string; parse both forms.
+Fixes #42
+Closes #17
+## Description
+Adds a humidity sensor to the hub device.
+## Type of change
+- [x] Bug fix
+- [ ] New feature
+- [ ] Breaking change
+## Checklist
+- [x] The code is formatted with ruff.
+- [x] Tests cover the change.
+- [ ] The documentation is updated.
+## How was this tested
+Ran the integration against a hub on firmware 2.3 for a week.
+## Additional information
+The vendor confirmed that the field is deprecated.
+Screenshots are not needed for this change.
+name: Bluefinch
+version: "1.4.0"
+slug: bluefinch
+description: Local bridge for Bluefinch hubs
+arch:
+- aarch64
+- amd64
+init: false
+options:
+log_level: info
+schema:
+log_level: list(trace|debug|info|notice|warning|error|fatal)?
+set_mode:
+fields:
+mode:
+required: true
+example: eco
+selector:
+select:
+options:
+- "eco"
+- "comfort"
+- "away"
+"domain": "bluefinch",
+"name": "Bluefinch",
+"codeowners": ["@octocat"],
+"config_flow": true,
+"documentation": "https://example.com/bluefinch",
+"integration_type": "hub",
+"iot_class": "local_polling",
+"requirements": ["bluefinch-client==2.3.1"],
+"version": "1.4.0"
+"homeassistant": "2025.1.0",
+"render_readme": true
+[tool.ruff]
+line-length = 100
+target-version = "py313"
+pytest-homeassistant-custom-component==0.13.205
+'''

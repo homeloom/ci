@@ -19,6 +19,18 @@ TYPES = pr_title.DEFAULT_TYPES.split()
         "refactor(core/io)!: split the client",
         "docs: update README",
         "chore(deps): bump pytest-homeassistant-custom-component from 0.13.300 to 0.13.301",
+        # Proper nouns and acronyms keep their case.
+        "fix: GitHub token refresh",
+        "feat: HomeKit bridge support",
+        "feat: iOS widget",
+        "fix: MQTT discovery",
+        "feat: API v2",
+        "fix(sensor,api): handle timeouts",
+        "fix(sensor, api/v2): handle timeouts",
+        # The titles of GitHub's Revert button.
+        'Revert "feat: add a sensor"',
+        'Revert "Revert "feat: add a sensor""',
+        'Revert "fix: GitHub token refresh"',
     ],
 )
 def test_valid_titles(title: str) -> None:
@@ -34,7 +46,16 @@ def test_valid_titles(title: str) -> None:
         ("feat(API): add", "type(scope): subject"),
         ("feat: add a sensor.", "period"),
         ("feat: Add a sensor", "lowercase"),
+        ("feat: A new sensor", "lowercase"),
+        ("feat: Zigbee support", "lowercase"),
         ("feat: " + "x" * 120, "at most"),
+        ("fix(sensor,): handle timeouts", "type(scope): subject"),
+        ("fix(sensor,,api): handle timeouts", "type(scope): subject"),
+        ("fix(sensor,API): handle timeouts", "type(scope): subject"),
+        ('Revert "Add a sensor"', "type(scope): subject"),
+        ('Revert "feat: Add a sensor"', "lowercase"),
+        ('Revert "feat: add a sensor', "type(scope): subject"),
+        ('Revert "feat: ' + "x" * 91 + '"', "at most 100 characters long (it has 106)"),
     ],
 )
 def test_invalid_titles(title: str, reason: str) -> None:

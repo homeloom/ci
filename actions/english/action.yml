@@ -7,7 +7,7 @@ inputs:
     description: Globs of files to skip, separated by spaces or commas.
     default: ""
   allowed-words:
-    description: Words accepted as English, such as accented brand names, separated by spaces or commas.
+    description: Words accepted as English, such as brand names (hyphenated ones included), separated by spaces or commas.
     default: ""
 runs:
   using: composite
