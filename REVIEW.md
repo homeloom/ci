@@ -84,7 +84,13 @@ severity:
       duplicated logic.
 - [ ] Comments explain why, not what. Public functions have docstrings.
 - [ ] Type hints on all functions.
-- [ ] Tests cover the behavior, including errors and edge cases, not just
-      the happy path; total coverage stays at or above 90 %.
+- [ ] Tests exercise real behavior, including errors and edge cases, not
+      just the happy path; they are not written to chase coverage. Total
+      coverage stays at or above 95 %.
+- [ ] Every `# pragma: no cover` gives its reason
+      (`# pragma: no cover - <reason>`), and reviewers question it as they
+      question a skipped test.
+- [ ] Lowering the coverage threshold (`coverage-minimum`) is justified in
+      writing in the pull request.
 - [ ] `CHANGELOG.md` and the documentation are updated.
 - [ ] CI is green, and it stays fast.

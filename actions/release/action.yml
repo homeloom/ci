@@ -1,10 +1,11 @@
 name: Release
 description: >-
-  Publish a GitHub release tagged v<version> for a commit when the tag does
-  not exist yet, with the matching CHANGELOG.md section as notes.
+  Publish a GitHub release tagged v<version>, with the matching CHANGELOG.md
+  section as notes, when the commit changed the version, the tag does not
+  exist yet and the version is greater than every existing version tag.
 inputs:
   sha:
-    description: Commit to release. It must be checked out.
+    description: Commit to release. It must be checked out with its parent (fetch-depth 2).
     required: true
   version-file:
     description: >-
@@ -35,6 +36,7 @@ runs:
         SHA: ${{ inputs.sha }}
         VERSION: ${{ steps.version.outputs.version }}
         PRERELEASE: ${{ steps.version.outputs.prerelease }}
+        CHANGED: ${{ steps.version.outputs.changed }}
         CHANGELOG: ${{ inputs.changelog }}
         PYTHONPATH: ${{ github.action_path }}/../../src
       run: bash "$GITHUB_ACTION_PATH/publish.sh"

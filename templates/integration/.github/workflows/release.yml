@@ -1,7 +1,9 @@
 name: Release
 
-# Publish a release tagged v<manifest version> when CI passes on main and the
-# tag does not exist yet. The notes come from the matching CHANGELOG.md section.
+# Publish a release tagged v<manifest version> when CI passes on the commit
+# of main that changes the version, if the tag does not exist yet and the
+# version is greater than every release. The notes come from the matching
+# CHANGELOG.md section.
 
 on:
   workflow_run:

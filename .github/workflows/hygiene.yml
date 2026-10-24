@@ -10,7 +10,7 @@ name: Hygiene
 # The denylist is the sum of every secret whose name starts with
 # PRIVACY_DENYLIST, so lists can be added without changing any workflow.
 # GitHub cannot pass secrets by a name pattern, so callers pass all of them
-# with `secrets: inherit`. Only the three steps that run the checks' own
+# with `secrets: inherit`. Only the steps that run the checks' own
 # Python code receive them, as the JSON of the secrets context in an input;
 # that code keeps the PRIVACY_DENYLIST* values and drops the variable before
 # it starts any subprocess. No third party tool or action sees the secrets,

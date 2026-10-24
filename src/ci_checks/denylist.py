@@ -1,4 +1,4 @@
-"""Match the terms of the PRIVACY_DENYLIST secret in text and binary content.
+"""Match denylisted terms in text and binary content.
 
 Matching ignores case, accents and invisible characters, respects word
 boundaries, and lets the words of a term be separated by any punctuation,

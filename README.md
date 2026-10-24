@@ -266,9 +266,10 @@ published as pre-releases.
 - The denylist secrets are passed with `secrets: inherit`, because GitHub
   cannot pass secrets by a name pattern. The reusable workflow hands the
   secrets context, as JSON, only to the steps that run this repository's own
-  Python code (masking, privacy and English). That code keeps the
-  `PRIVACY_DENYLIST*` values and removes the variable before it starts git;
-  gitleaks, actionlint and the license job never receive it. As a
+  Python code (masking, personal data, secrets and English). That code keeps
+  the `PRIVACY_DENYLIST*` values and removes the variable before it starts
+  git or gitleaks, so they never receive it, nor do actionlint and the
+  license job. As a
   consequence, a change to this repository could read every secret of the
   repositories that call it once they move their pin, so changes here go
   through the same review and ruleset as everywhere else. One environment
