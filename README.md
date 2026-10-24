@@ -77,8 +77,13 @@ Secrets: every secret whose name starts with `PRIVACY_DENYLIST`, such as
 per line (lines starting with `#` are comments). The check merges them all.
 A secret cannot be read back, so separate lists let each one be replaced
 whole without retyping the others. Callers pass them with
-`secrets: inherit` (see the design notes). The log shows how many lists were
-read and how many are empty, never their names or their terms.
+`secrets: inherit` (see the design notes). The checks print how many lists
+were read and how many are empty, never a term. GitHub itself shows the
+secrets context in the step headers with every value masked, so the names of
+the secrets appear in the logs: give them neutral names. GitHub also masks
+each line of a secret everywhere in the log, so a line made only of `#`
+signs hides those signs in the whole log; start comments with `# ` and a
+word.
 
 Matching ignores case, accents and invisible characters such as soft
 hyphens, respects word boundaries and accepts any punctuation, underscore,

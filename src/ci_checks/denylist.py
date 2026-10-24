@@ -329,7 +329,7 @@ def denylist_sources(environ: MutableMapping[str, str]) -> list[str]:
 
     The secrets come as the JSON of the workflow secrets context, which holds
     other secrets too, so it is removed from the environment before any
-    subprocess can inherit it, and is never printed.
+    subprocess can inherit it, and this code never prints it.
     """
     found: dict[str, str] = {}
     raw = environ.pop(SECRETS_VARIABLE, "")

@@ -896,7 +896,7 @@ def mask_terms(denylist: Denylist) -> Iterator[str]:
 def check_denylist_sources(sources: list[str], pr: PullRequest | None, reporter: Reporter) -> None:
     """Fail when no denylist holds a term, and warn about empty ones.
 
-    Only counts are printed: the names of the secrets may hint at their content.
+    Only counts are printed, never a name or a term.
     """
     empty = sum(1 for raw in sources if not Denylist(raw))
     if empty < len(sources):
