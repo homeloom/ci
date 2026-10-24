@@ -35,11 +35,45 @@ DEFAULT_ALLOWED = frozenset(
     Zlib
     """.split()
 )
+# SPDX license exceptions (license list 3.29.0). Each one only adds
+# permissions to the license it follows.
+SPDX_EXCEPTIONS = frozenset(
+    """
+    389-exception Asterisk-exception Asterisk-linking-protocols-exception
+    Autoconf-exception-2.0 Autoconf-exception-3.0 Autoconf-exception-generic
+    Autoconf-exception-generic-3.0 Autoconf-exception-macro Bison-exception-1.24
+    Bison-exception-2.2 Bootloader-exception CGAL-linking-exception Classpath-exception-2.0
+    Classpath-exception-2.0-short CLISP-exception-2.0 cryptsetup-OpenSSL-exception
+    Digia-Qt-LGPL-exception-1.1 DigiRule-FOSS-exception eCos-exception-2.0
+    erlang-otp-linking-exception Fawkes-Runtime-exception FLTK-exception fmt-exception
+    Font-exception-2.0 freertos-exception-2.0 GCC-exception-2.0 GCC-exception-2.0-note
+    GCC-exception-3.1 Gmsh-exception GNAT-exception GNOME-examples-exception
+    GNU-compiler-exception gnu-javamail-exception Google-Patent-WebM
+    GPL-3.0-389-ds-base-exception GPL-3.0-interface-exception GPL-3.0-linking-exception
+    GPL-3.0-linking-source-exception GPL-CC-1.0 GStreamer-exception-2005
+    GStreamer-exception-2008 harbour-exception i2p-gpl-java-exception
+    Independent-modules-exception KiCad-libraries-exception kvirc-openssl-exception
+    LGPL-3.0-linking-exception libpri-OpenH323-exception Libtool-exception
+    Linux-syscall-note LLGPL LLVM-exception LZMA-exception mif-exception mxml-exception
+    OCaml-LGPL-linking-exception OCCT-exception-1.0 OpenJDK-assembly-exception-1.0
+    openvpn-openssl-exception PCRE2-exception polyparse-exception
+    PS-or-PDF-font-exception-20170817 QPL-1.0-INRIA-2004-exception Qt-GPL-exception-1.0
+    Qt-LGPL-exception-1.1 Qwt-exception-1.0 romic-exception RRDtool-FLOSS-exception-2.0
+    rsync-linking-exception SANE-exception SHL-2.0 SHL-2.1 Simple-Library-Usage-exception
+    Spelling-Provider-LGPL-exception sqlitestudio-OpenSSL-exception stunnel-exception
+    SWI-exception Swift-exception Texinfo-exception u-boot-exception-2.0 UBDL-exception
+    Universal-FOSS-exception-1.0 vsftpd-openssl-exception WxWindows-exception-3.1
+    x11vnc-openssl-exception
+    """.split()
+)
+PROPRIETARY = "LicenseRef-Proprietary"
 CLASSIFIERS = {
     "Apache Software License": "Apache-2.0",
     "BSD License": "BSD",
+    "Blue Oak Model License (BlueOak-1.0.0)": "BlueOak-1.0.0",
     "Boost Software License 1.0 (BSL-1.0)": "BSL-1.0",
     "CC0 1.0 Universal (CC0 1.0) Public Domain Dedication": "CC0-1.0",
+    "CMU License (MIT-CMU)": "MIT-CMU",
     "GNU Affero General Public License v3": "AGPL-3.0-only",
     "GNU Affero General Public License v3 or later (AGPLv3+)": "AGPL-3.0-or-later",
     # Without a version, the GNU licenses let the licensee pick any version.
@@ -58,10 +92,12 @@ CLASSIFIERS = {
     "MIT License": "MIT",
     "MIT No Attribution License (MIT-0)": "MIT-0",
     "Mozilla Public License 2.0 (MPL 2.0)": "MPL-2.0",
-    "Other/Proprietary License": "LicenseRef-Proprietary",
+    "Other/Proprietary License": PROPRIETARY,
     "Python License (CNRI Python License)": "CNRI-Python",
     "Python Software Foundation License": "PSF-2.0",
     "The Unlicense (Unlicense)": "Unlicense",
+    "Universal Permissive License (UPL)": "UPL-1.0",
+    "Zero-Clause BSD (0BSD)": "0BSD",
     "zlib/libpng License": "Zlib",
 }
 # License classifiers that add no condition to the licenses they come with.
@@ -92,31 +128,45 @@ FREE_TEXT = {
     "psfl": "PSF-2.0",
     "python software foundation": "PSF-2.0",
     "unlicense": "Unlicense",
+    "universal permissive": "UPL-1.0",
+    "universal permissive 1.0": "UPL-1.0",
     "zlib/libpng": "Zlib",
 }
-# Phrases of full license texts, compared with whitespace collapsed.
+# Phrases of full license texts, compared with whitespace collapsed. A
+# single line is never read as a full text, since it is more likely a
+# notice about one bundled component.
 TEXT_FINGERPRINTS = (
     ("permission is hereby granted, free of charge", "MIT"),
     ("terms and conditions for use, reproduction, and distribution", "Apache-2.0"),
     ("licensed under the apache license, version 2.0", "Apache-2.0"),
     ("redistribution and use in source and binary forms", "BSD"),
 )
-# Restrictions that some packages add to a permissive license. No SPDX
-# exception is named like this, since exceptions only ever widen a license.
+# Restrictions that some packages add to a permissive license, in free text.
 RESTRICTION = re.compile(r"commons[\s_-]*clause|proprietary|non[\s_-]*commercial", re.IGNORECASE)
-# Free text naming a restriction or a copyleft license is never translated
-# into a permissive license, even when it also names one.
-RESTRICTIVE_TEXT = re.compile(rf"{RESTRICTION.pattern}|gpl|general public", re.IGNORECASE)
-# A manifest requirement must start with a distribution name (PEP 508), or
-# uv may read it as an option, a path or a URL. uv also drops a byte order
+# GNU licenses, as named in free text and as SPDX license families.
+GNU_LICENSE = re.compile(r"gpl|general public", re.IGNORECASE)
+GNU_FAMILIES = frozenset({"AGPL", "GPL", "LGPL"})
+# Free text naming a restriction or a GNU license is never translated into
+# a permissive license, even when it also names one.
+RESTRICTIVE_TEXT = re.compile(rf"{RESTRICTION.pattern}|{GNU_LICENSE.pattern}", re.IGNORECASE)
+# A PEP 508 requirement starts with a distribution name; anything else may
+# be read by uv as an option, a path or a URL. uv also drops a byte order
 # mark at the start of the file, which str.strip() keeps.
 REQUIREMENT_NAME = re.compile(
     r"\s*([A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?)(?=[\s\[(<>=!~;@]|\Z)"
 )
+# Home Assistant still accepts "<url>#<requirement>" from custom
+# integrations, as in "git+https://example.com/lib.git#lib>=1". The part
+# after "#" must then start with a distribution name.
+LEGACY_URL_REQUIREMENT = re.compile(r"\s*[A-Za-z][A-Za-z0-9+.-]*://[^\s#]+#(\S+)\s*")
 # Names that uv reads as the path of an archive.
 ARCHIVE_NAME = re.compile(r"\.(?:whl|zip|tgz|tar(?:\.\w+)?)\Z", re.IGNORECASE)
-_OPERATOR = re.compile(r"\s+(AND|OR)\s+")
+_OPERATOR = re.compile(r"\s+(AND|OR)\s+", re.IGNORECASE)
 _IDENTIFIER = re.compile(r"[A-Za-z0-9.+-]+")
+_LICENSE_WORD = re.compile(r"\blicen[cs]e\b", re.IGNORECASE)
+_VERSIONED = re.compile(r"(.+)-(\d+(?:\.\d+)*)(-only|-or-later)?")
+_OPERATORS = frozenset({"AND", "OR", "WITH", "(", ")"})
+_EXCEPTIONS = frozenset(item.lower() for item in SPDX_EXCEPTIONS)
 PLATFORM = "x86_64-manylinux_2_28"
 
 
@@ -142,6 +192,13 @@ class _Expression:
         self.tokens = self._TOKEN.findall(text)
         self.position = 0
         self.allowed = {item.lower() for item in allowed}
+        # The allowed licenses that name a version, as (license, version).
+        self.versions = [
+            (match[1], _version(match[2]))
+            for item in self.allowed
+            if (match := _VERSIONED.fullmatch(item))
+        ]
+        self.identifiers: list[str] = []
 
     def evaluate(self) -> bool:
         result = self._or()
@@ -182,20 +239,40 @@ class _Expression:
             if self._take() != ")":
                 raise ValueError("missing parenthesis")
             return result
-        if item.upper() in {"AND", "OR", "WITH", ")"}:
+        if item.upper() in _OPERATORS:
             raise ValueError("unexpected operator")
+        self.identifiers.append(item)
+        allowed = self._allows(item.lower())
         if (self._peek() or "").upper() == "WITH":
             self._take()
-            # Exceptions only widen what a license allows, unless the
-            # "exception" is in fact a restriction.
-            if RESTRICTION.search(self._take()):
-                return False
-        name = item.lower()
+            exception = self._take()
+            if exception.upper() in _OPERATORS:
+                raise ValueError("missing exception")
+            # An SPDX exception only adds permissions. Anything else, such as
+            # a LicenseRef, may take some away.
+            allowed = allowed and exception.lower() in _EXCEPTIONS
+        return allowed
+
+    def _allows(self, name: str) -> bool:
+        """Return whether a license identifier, in lower case, is allowed."""
         # Deprecated SPDX forms: "X+" means "X-or-later" and a bare "X" means "X-only".
         candidates = {name, name + "-only"}
         if name.endswith("+"):
-            candidates.add(name[:-1] + "-or-later")
-        return not candidates.isdisjoint(self.allowed)
+            name = name[:-1] + "-or-later"
+            candidates.add(name)
+        if not candidates.isdisjoint(self.allowed):
+            return True
+        # "X-2.0-or-later" can be used under version 2.0 or any later version.
+        match = _VERSIONED.fullmatch(name)
+        if not match or match[3] != "-or-later":
+            return False
+        minimum = _version(match[2])
+        return any(family == match[1] and version >= minimum for family, version in self.versions)
+
+
+def _version(text: str) -> tuple[int, ...]:
+    """Return a version such as "2.1" as numbers, so that versions compare."""
+    return tuple(int(part) for part in text.split("."))
 
 
 def expression_allowed(expression: str, allowed: frozenset[str]) -> bool | None:
@@ -207,21 +284,35 @@ def expression_allowed(expression: str, allowed: frozenset[str]) -> bool | None:
 
 
 def license_of(metadata: str) -> str | None:
-    """Return the license of a distribution as an SPDX expression, if known."""
+    """Return the license of a distribution as an SPDX expression, if known.
+
+    License-Expression is authoritative. Otherwise the License field decides
+    together with the classifiers it does not account for (see `_refine`).
+    When it accounts for none of them, the classifiers decide, unless the
+    field names something that they cannot express.
+    """
     headers = HeaderParser().parsestr(metadata)
     expression = headers.get("License-Expression")
     if expression:
         return expression.strip()
-    found = {
+    text = (headers.get("License") or "").strip()
+    declared = _text_license(text)
+    classified = {
         spdx
         for classifier in headers.get_all("Classifier") or []
         if (spdx := _classifier_license(classifier.strip()))
     }
-    if found:
-        # Several classifiers may mean a choice or a combination; assume the
-        # stricter combination. Reviewed packages go in the exceptions.
-        return " AND ".join(sorted(found))
-    return _text_license((headers.get("License") or "").strip())
+    if not classified:
+        return declared
+    refined = _refine(declared, classified) if declared else None
+    if refined:
+        return refined
+    if "\n" not in text and _unexplained(text, classified):
+        # Reported as written: the classifiers cannot express it.
+        return text
+    # Several classifiers may mean a choice or a combination; assume the
+    # stricter combination. Reviewed packages go in the exceptions.
+    return " AND ".join(sorted(classified))
 
 
 def _classifier_license(classifier: str) -> str | None:
@@ -238,40 +329,130 @@ def _classifier_license(classifier: str) -> str | None:
     return CLASSIFIERS.get(name) or "LicenseRef-" + re.sub(r"[^A-Za-z0-9.]+", "-", name).strip("-")
 
 
+def _refine(declared: str, classified: set[str]) -> str | None:
+    """Combine the License field with the classifiers, if it accounts for any of them.
+
+    The core metadata specification lets the License field name the version
+    or the variant of a license that a classifier names, so the field is more
+    precise than the classifiers it accounts for, and can state a choice that
+    classifiers cannot. The classifiers it does not account for are added to
+    it. A field that accounts for none of them gives None: it is then either
+    unrelated text or contradicts the classifiers.
+    """
+    identifiers = _license_ids(declared)
+    others = sorted(
+        spdx
+        for spdx in classified
+        if not any(_accounts_for(identifier, spdx) for identifier in identifiers)
+    )
+    if len(others) == len(classified):
+        return None
+    if not others:
+        return declared
+    return " AND ".join([f"({declared})" if len(identifiers) > 1 else declared, *others])
+
+
+def _license_ids(expression: str) -> list[str]:
+    """Return the license identifiers of an SPDX expression, or none if it does not parse."""
+    parser = _Expression(expression, frozenset())
+    try:
+        parser.evaluate()
+    except ValueError:
+        return []
+    return parser.identifiers
+
+
+def _accounts_for(identifier: str, classified: str) -> bool:
+    """Return whether a license of the License field accounts for a classifier license.
+
+    It does when it is the same license, or a version of it, such as
+    BSD-3-Clause for the BSD License classifier or LGPL-2.1-or-later for the
+    versionless LGPL one. Poetry adds Other/Proprietary License to every
+    license it has no classifier for, so any license accounts for that one.
+    """
+    if classified == PROPRIETARY or identifier.lower() == classified.lower():
+        return True
+    family = classified.split("-")[0]
+    versioned = re.match(rf"{re.escape(family)}-\d", identifier, re.IGNORECASE)
+    return family != "LicenseRef" and versioned is not None
+
+
+def _unexplained(text: str, classified: set[str]) -> bool:
+    """Return whether a License field names a restriction, or a GNU license no classifier names."""
+    if RESTRICTION.search(text):
+        return True
+    gnu_classified = any(spdx.split("-")[0] in GNU_FAMILIES for spdx in classified)
+    return not gnu_classified and GNU_LICENSE.search(text) is not None
+
+
 def _text_license(text: str) -> str | None:
     """Return the license of a free-text License field as an SPDX expression.
 
-    Text that cannot be translated unambiguously is returned unchanged when it
-    is a single line, so that it fails to parse or is not allowed and is
-    reported as written; a full license text that is not recognized is
-    unknown.
+    A single line is a license name or expression. It is translated when every
+    license it names is known and it names no restriction or GNU license, and
+    is returned as written otherwise, so that it fails to parse or is not
+    allowed and is reported as written. Several lines are a full license text.
     """
     if not text or text.upper() == "UNKNOWN":
         return None
-    restrictive = RESTRICTIVE_TEXT.search(text) is not None
-    single_line = "\n" not in text
-    if single_line and not restrictive:
+    if "\n" in text:
+        return _full_text_license(text)
+    if not RESTRICTIVE_TEXT.search(text):
         translated = _translate_names(text)
         if translated:
             return translated
+    return text
+
+
+def _full_text_license(text: str) -> str | None:
+    """Return the licenses that a full license text quotes, or None if it is not recognized.
+
+    The text must quote a known license and name no restriction or GNU
+    license. When its first line names a license, as in "BSD 3-Clause
+    License", that name must be known too: it is more precise than the
+    phrases, and a text that names another license, such as "Eclipse Public
+    License 2.0", may only quote a known one for a bundled component.
+    """
+    if RESTRICTIVE_TEXT.search(text):
+        return None
+    found = _fingerprints(text)
+    title = text.split("\n", 1)[0].strip()
+    if found and _LICENSE_WORD.search(title) and not _fingerprints(title):
+        named = _license_name(title)
+        if not named:
+            return None
+        found = {named, *(spdx for spdx in found if not _accounts_for(named, spdx))}
+    # A text that quotes several licenses gets all of them.
+    return " AND ".join(sorted(found)) or None
+
+
+def _fingerprints(text: str) -> set[str]:
+    """Return the licenses whose phrases a text quotes."""
     words = " ".join(text.lower().split())
-    found = sorted({spdx for phrase, spdx in TEXT_FINGERPRINTS if phrase in words})
-    if found and not restrictive:
-        # A text that quotes several licenses gets all of them.
-        return " AND ".join(found)
-    return text if single_line else None
+    return {spdx for phrase, spdx in TEXT_FINGERPRINTS if phrase in words}
 
 
 def _translate_names(text: str) -> str | None:
-    """Translate license names joined by AND or OR into SPDX identifiers, if all are known."""
+    """Translate license names joined by AND or OR into SPDX identifiers, if all are known.
+
+    The operators may be in any case, as in "MIT or Apache 2.0", as they are
+    for the evaluator.
+    """
+    named = _license_name(text)
+    if named:
+        # Some names contain an operator, as in "Historical Permission
+        # Notice and Disclaimer (HPND)".
+        return named
     parts = _OPERATOR.split(text)
-    for index in range(0, len(parts), 2):
-        term = parts[index]
+    for index, part in enumerate(parts):
+        if index % 2:
+            parts[index] = part.upper()
+            continue
         # Parentheses inside a name are part of it, as in "ISC License
         # (ISCL)"; grouping parentheses would be lost by the translation.
-        if term.count("(") != term.count(")"):
+        if part.count("(") != part.count(")"):
             return None
-        spdx = _license_name(term) or (term if _IDENTIFIER.fullmatch(term) else None)
+        spdx = _license_name(part) or (part if _IDENTIFIER.fullmatch(part) else None)
         if spdx is None:
             return None
         parts[index] = spdx
@@ -311,8 +492,7 @@ def install(
     the uv configuration of the checked out repository is ignored.
     """
     for requirement in requirements:
-        name = REQUIREMENT_NAME.match(requirement)
-        if not name or ARCHIVE_NAME.search(name[1]) or requirement.splitlines() != [requirement]:
+        if not _valid_requirement(requirement):
             raise ValueError(f"Invalid manifest requirement: {requirement!r}")
     listing = target.parent / "manifest-requirements.txt"
     listing.write_text("".join(f"{line}\n" for line in requirements), encoding="utf-8")
@@ -335,6 +515,19 @@ def install(
     for path in files:
         command += ["--requirement", str(path)]
     subprocess.run(command, check=True)
+
+
+def _valid_requirement(requirement: str) -> bool:
+    """Return whether a manifest requirement is a single requirement that Home Assistant accepts.
+
+    That is a PEP 508 requirement, which starts with a distribution name, or
+    the legacy form "<url>#<requirement>".
+    """
+    if requirement.splitlines() != [requirement]:
+        return False
+    legacy = LEGACY_URL_REQUIREMENT.fullmatch(requirement)
+    name = REQUIREMENT_NAME.match(legacy[1] if legacy else requirement)
+    return name is not None and not ARCHIVE_NAME.search(name[1])
 
 
 def installed(target: Path) -> Iterable[tuple[str, str, str | None]]:
