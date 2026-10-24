@@ -24,5 +24,6 @@ After copying the files:
 1. Add a ruleset on `main` that requires a pull request, allows squash
    merging only and requires the **Report** status check.
 2. Enable private vulnerability reporting (Settings, Security).
-3. Give the repository access to the `PRIVACY_DENYLIST` organization secret,
-   both as an Actions secret and as a Dependabot secret.
+3. Give the repository access to every organization secret whose name
+   starts with `PRIVACY_DENYLIST`, both as Actions secrets and as Dependabot
+   secrets. The CI workflow passes them with `secrets: inherit`.

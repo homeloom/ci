@@ -1,10 +1,14 @@
 name: Privacy
 description: >-
   Scan the files, the commits and the pull request text for secrets and
-  personal data. Needs a checkout with fetch-depth 0. The denylist is read
-  from the PRIVACY_DENYLIST environment variable, which the calling step sets
-  from a secret.
+  personal data. Needs a checkout with fetch-depth 0.
 inputs:
+  denylist-secrets:
+    description: >-
+      The secrets context as JSON, from the expression toJSON(secrets). Every
+      secret whose name starts with PRIVACY_DENYLIST holds denylisted terms;
+      the others are ignored. Only the personal data scan receives it, not gitleaks.
+    default: "{}"
   allowed-domains:
     description: Extra domains allowed in URLs, separated by spaces or commas.
     default: ""
@@ -12,7 +16,7 @@ inputs:
     description: Globs of files skipped by the generic patterns (never by the denylist or gitleaks).
     default: ""
   require-denylist:
-    description: Fail when the denylist is empty. Pull requests from forks only warn.
+    description: Fail when no denylist secret holds a term.
     default: "true"
 runs:
   using: composite
@@ -22,6 +26,7 @@ runs:
     - name: Scan for personal data
       shell: bash
       env:
+        CI_SECRETS: ${{ inputs.denylist-secrets }}
         ALLOWED_DOMAINS: ${{ inputs.allowed-domains }}
         EXCLUDE: ${{ inputs.exclude }}
         REQUIRE_DENYLIST: ${{ inputs.require-denylist }}

@@ -5,7 +5,16 @@ name: Hygiene
 # minutes; every step runs even when an earlier one fails, so a single run
 # reports every problem. The license check installs third party packages,
 # which may run their build code, so it runs in its own job that never
-# receives the denylist secret.
+# receives a secret.
+#
+# The denylist is the sum of every secret whose name starts with
+# PRIVACY_DENYLIST, so lists can be added without changing any workflow.
+# GitHub cannot pass secrets by a name pattern, so callers pass all of them
+# with `secrets: inherit`. Only the three steps that run the checks' own
+# Python code receive them, as the JSON of the secrets context in an input;
+# that code keeps the PRIVACY_DENYLIST* values and drops the variable before
+# it starts any subprocess. No third party tool or action sees the secrets,
+# and nothing prints their names or values.
 #
 # Callers run this workflow on draft pull requests too: it takes seconds,
 # and personal data must be found as soon as it is pushed.
@@ -22,7 +31,7 @@ on:
         type: string
         default: ""
       require-denylist:
-        description: Fail when the PRIVACY_DENYLIST secret is empty.
+        description: Fail when no secret whose name starts with PRIVACY_DENYLIST holds a term.
         type: boolean
         default: true
       english-exclude:
@@ -49,10 +58,6 @@ on:
         description: Package names exempted after a manual license review.
         type: string
         default: ""
-    secrets:
-      PRIVACY_DENYLIST:
-        description: Terms that must never appear, one per line.
-        required: false
 
 permissions: {}
 
@@ -67,8 +72,8 @@ jobs:
       # Before the checkout, which prints the name of every branch.
       - name: Mask denylisted terms
         uses: $/actions/mask-denylist
-        env:
-          PRIVACY_DENYLIST: ${{ secrets.PRIVACY_DENYLIST }}
+        with:
+          denylist-secrets: ${{ toJSON(secrets) }}
 
       - name: Check out
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -83,9 +88,8 @@ jobs:
       - name: Privacy
         if: ${{ !cancelled() }}
         uses: $/actions/privacy
-        env:
-          PRIVACY_DENYLIST: ${{ secrets.PRIVACY_DENYLIST }}
         with:
+          denylist-secrets: ${{ toJSON(secrets) }}
           allowed-domains: ${{ inputs.allowed-domains }}
           exclude: ${{ inputs.privacy-exclude }}
           require-denylist: ${{ inputs.require-denylist }}

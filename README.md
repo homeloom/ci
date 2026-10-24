@@ -59,7 +59,7 @@ silently checking less.
 | --- | --- | --- |
 | `allowed-domains` | | Extra domains allowed in URLs and noreply addresses. |
 | `privacy-exclude` | | Globs skipped by the generic personal data patterns. |
-| `require-denylist` | `true` | Fail when the `PRIVACY_DENYLIST` secret is empty, including on fork pull requests. |
+| `require-denylist` | `true` | Fail when no `PRIVACY_DENYLIST*` secret holds a term, including on fork pull requests. |
 | `english-exclude` | | Globs skipped by the language check. |
 | `english-allowed-words` | | Words the language check accepts, such as accented brand names. |
 | `license` | `MIT` | SPDX identifier the LICENSE file must match. |
@@ -67,18 +67,32 @@ silently checking less.
 | `license-allowed` | | SPDX identifiers that replace the default allowed list. |
 | `license-exceptions` | | Packages exempted after a manual license review. |
 
-Secret: `PRIVACY_DENYLIST`, one term per line (lines starting with `#` are
-comments). Matching ignores case and accents, respects word boundaries and
-accepts any punctuation, underscore or line break between the words of a
-term, so `First Last` also matches `first_last` and `First-Last`. List only
-terms that never belong in a repository: not the GitHub usernames of
-maintainers, which appear in noreply addresses and attributions, since the
-denylist has no exceptions.
+Secrets: every secret whose name starts with `PRIVACY_DENYLIST`, such as
+`PRIVACY_DENYLIST` and `PRIVACY_DENYLIST_STREETS`, holds a denylist, one term
+per line (lines starting with `#` are comments). The check merges them all.
+A secret cannot be read back, so separate lists let each one be replaced
+whole without retyping the others. Callers pass them with
+`secrets: inherit` (see the design notes). The log shows how many lists were
+read and how many are empty, never their names or their terms.
+
+Matching ignores case, accents and invisible characters such as soft
+hyphens, respects word boundaries and accepts any punctuation, underscore,
+line break or nothing at all between the words of a term, so `First Last`
+also matches `first_last`, `First-Last`, `FirstLast` and a `First` that ends
+one line followed by a `Last` that starts the next. Terms of five letters or
+more also match as a part of a camel case name, such as `getFirstLast`. Text
+that writes characters as escapes (`\u00e9`, `\x41`, `\n`, `%20`, `&eacute;`)
+is also matched decoded. List only terms that never belong in a repository:
+not the GitHub usernames of maintainers, which appear in noreply addresses
+and attributions, and not common words, which also match inside names such
+as `max_value`, since the denylist has no exceptions.
 
 The first step of the job masks the common spellings of each term (as
 written, in lower, upper and title case, without accents, with spaces,
-underscores, hyphens or dots between words) for the rest of the job log,
-before the checkout prints the branch names.
+underscores, hyphens, dots or nothing between words) for the rest of the job
+log, before the checkout prints the branch names. Masking is a safety net
+that cannot cover every spelling: the checks never print a term, and they
+redact the file paths they print.
 
 The **Hygiene** job checks:
 
@@ -101,9 +115,16 @@ The **Hygiene** job checks:
   - the pull request title and body.
 - **Commit identities**: authors and committers of the whole history must
   use GitHub noreply addresses, or a `noreply` mailbox at an allowed domain.
+- **Binary files**: the metadata of images and documents (PNG text chunks,
+  JPEG comments, EXIF with its GPS position, IPTC, XMP and the information
+  fields of PDF files) goes through the generic patterns except URLs, and a
+  GPS position counts as coordinates.
 - **Denylist**: everything above, plus the readable strings of binary files,
   file paths, the commit authors, committers and messages of the whole
   history, and the branch name.
+- **Unreadable content**: a file stored with Git LFS fails the check, because
+  only its pointer is in the repository while its content is published
+  unchecked. So does a tracked file missing from the checkout.
 - **English**: French text outside translation files, in files, new commit
   messages and the pull request title and body.
 - **Workflows**: actionlint with shellcheck.
@@ -149,9 +170,11 @@ Limits:
   IPv4 addresses outside URLs (they look like version numbers), nor text in
   images, archives or encoded data. The denylist and the review cover what
   the patterns cannot.
-- In binary files, terms of four letters or less only count inside phrases
-  of several words (such as a title in image metadata), because random bytes
-  spell short words by chance.
+- In binary files, terms of three or four letters only count inside phrases
+  of several words (such as a title in image metadata), and shorter terms not
+  at all, because random bytes spell short words by chance. Single byte
+  (Latin-1) strings are only searched for the longer terms. PDF files are
+  always read as binary files.
 - Files larger than 20 MB are skipped with a warning.
 
 ### python-lint.yml
@@ -212,9 +235,10 @@ published as pre-releases.
   before the first repository that calls it becomes public.
 - **Actions access**: while private, this repository is accessible from
   repositories in the organization (Settings, Actions, General, Access).
-- **Secrets**: `PRIVACY_DENYLIST` exists as an organization Actions secret
-  and as an organization Dependabot secret, both available to every
-  repository that calls `hygiene.yml`.
+- **Secrets**: each denylist secret (a name starting with `PRIVACY_DENYLIST`)
+  exists as an organization Actions secret and as an organization Dependabot
+  secret of the same name, both available to every repository that calls
+  `hygiene.yml`.
 - **Dependabot**: allowed to read this private repository, so it can update
   the pins in other repositories.
 - **Rulesets**: `main` requires a pull request, squash merging and the
@@ -234,6 +258,17 @@ published as pre-releases.
 - Cheap checks share one job, because GitHub bills each job by the started
   minute. The license check is the exception: it installs third party
   packages, so it runs in a job without secrets.
+- The denylist secrets are passed with `secrets: inherit`, because GitHub
+  cannot pass secrets by a name pattern. The reusable workflow hands the
+  secrets context, as JSON, only to the steps that run this repository's own
+  Python code (masking, privacy and English). That code keeps the
+  `PRIVACY_DENYLIST*` values and removes the variable before it starts git;
+  gitleaks, actionlint and the license job never receive it. As a
+  consequence, a change to this repository could read every secret of the
+  repositories that call it once they move their pin, so changes here go
+  through the same review and ruleset as everywhere else. One environment
+  variable holds at most 128 KiB on Linux, which bounds the total size of the
+  secrets available to a repository.
 - The hassfest and HACS actions are pinned by SHA, but they run container
   images that their maintainers publish under moving tags. This is an
   accepted risk: they are the official validators, and they run in a job

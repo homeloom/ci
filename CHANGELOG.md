@@ -14,6 +14,10 @@ All notable changes to this project are documented here. The format follows
   English, licenses, actionlint), Python lint, Home Assistant tests on the
   oldest supported and the latest release, hassfest and HACS validation,
   Home Assistant app lint and build, and releases from `CHANGELOG.md`.
+- Privacy check: generic personal data patterns, image and document
+  metadata, the content of commits that later commits remove, and a
+  denylist merged from every secret whose name starts with
+  `PRIVACY_DENYLIST`.
 - Composite actions for each check, and a tool installer that verifies
   SHA-256 digests.
 - Templates for new repositories: license, security policy, contribution

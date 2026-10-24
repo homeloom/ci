@@ -32,8 +32,9 @@ jobs:
       # Session links and noreply commit addresses of AI coding assistants.
       # Keep only the domains of the assistants that contribute.
       allowed-domains: anthropic.com claude.ai claude.com
-    secrets:
-      PRIVACY_DENYLIST: ${{ secrets.PRIVACY_DENYLIST }}
+    # Passes every secret: the denylist is the sum of the secrets whose names
+    # start with PRIVACY_DENYLIST, and only the checks' own code reads them.
+    secrets: inherit
 
   apps:
     if: github.event.pull_request.draft != true
