@@ -22,6 +22,10 @@ jobs:
   # Runs on drafts too: it is fast, and finds personal data as soon as it is pushed.
   hygiene:
     uses: ./.github/workflows/hygiene.yml
+    permissions:
+      contents: read
+      # The hygiene job reads the current pull request title and body.
+      pull-requests: read
     with:
       # Session links and the noreply commit address of the AI coding assistant
       # that contributes to this repository.

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import codecs
+import json
 import os
 import subprocess
 from pathlib import Path
@@ -88,6 +89,16 @@ def test_event_helpers(event: EventWriter) -> None:
     assert _common.new_commit_range(loaded) == ["base..head"]
 
     assert not _common.pull_request(pr_event("a", "b", login="claude[bot]")).is_dependency_bot
+
+
+def test_event_copy_with_current_text(
+    event: EventWriter, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    event(pr_event("base", "head", title="old"))
+    current = tmp_path / "current.json"
+    current.write_text(json.dumps(pr_event("base", "head", title="new")), encoding="utf-8")
+    monkeypatch.setenv("CI_EVENT_PATH", str(current))
+    assert _common.pull_request(_common.load_event()).title == "new"
     assert _common.pull_request({}) is None
     assert _common.history_tip({}) == "HEAD"
     assert _common.new_commit_range({"before": "a", "after": "b"}) == ["a..b"]

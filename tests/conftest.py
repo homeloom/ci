@@ -26,4 +26,5 @@ def event(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Callable[[dict], N
         monkeypatch.setenv("GITHUB_EVENT_PATH", str(path))
 
     monkeypatch.delenv("GITHUB_EVENT_PATH", raising=False)
+    monkeypatch.delenv("CI_EVENT_PATH", raising=False)
     return write

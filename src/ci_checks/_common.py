@@ -219,8 +219,13 @@ def allowed_by_pragma(line: str, category: str) -> bool:
 
 
 def load_event() -> dict:
-    """Return the payload of the event that triggered the workflow."""
-    path = os.environ.get("GITHUB_EVENT_PATH")
+    """Return the payload of the event that triggered the workflow.
+
+    CI_EVENT_PATH, when set, points to a copy of the payload with the current
+    pull request title and body: a run started again later keeps the payload
+    of its first attempt, which may hold text edited since.
+    """
+    path = os.environ.get("CI_EVENT_PATH") or os.environ.get("GITHUB_EVENT_PATH")
     if not path or not Path(path).is_file():
         return {}
     with Path(path).open(encoding="utf-8") as handle:

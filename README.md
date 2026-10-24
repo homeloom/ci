@@ -67,6 +67,11 @@ silently checking less.
 | `license-allowed` | | SPDX identifiers that replace the default allowed list. |
 | `license-exceptions` | | Packages exempted after a manual license review. |
 
+The calling job grants `contents: read` and `pull-requests: read`. The
+second lets the checks read the current pull request title and body: a run
+that is started again keeps the event of its first attempt, whose text may
+have been edited since.
+
 Secrets: every secret whose name starts with `PRIVACY_DENYLIST`, such as
 `PRIVACY_DENYLIST` and `PRIVACY_DENYLIST_STREETS`, holds a denylist, one term
 per line (lines starting with `#` are comments). The check merges them all.

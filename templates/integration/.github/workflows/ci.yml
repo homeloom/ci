@@ -28,6 +28,10 @@ jobs:
   # Runs on drafts too: it is fast, and finds personal data as soon as it is pushed.
   hygiene:
     uses: homeloom/ci/.github/workflows/hygiene.yml@REPLACE_WITH_RELEASE_SHA # vX.Y.Z
+    permissions:
+      contents: read
+      # The hygiene job reads the current pull request title and body.
+      pull-requests: read
     with:
       # Session links and noreply commit addresses of AI coding assistants.
       # Keep only the domains of the assistants that contribute.

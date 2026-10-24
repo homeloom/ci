@@ -68,6 +68,8 @@ jobs:
     timeout-minutes: 10
     permissions:
       contents: read
+      # To read the current pull request title and body.
+      pull-requests: read
     steps:
       # Before the checkout, which prints the name of every branch.
       - name: Mask denylisted terms
@@ -80,6 +82,23 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
+
+      # A run that is started again keeps the event of its first attempt,
+      # whose title and body may have been edited since. The checks read a
+      # copy of the event with the current text.
+      - name: Read the current pull request text
+        if: github.event_name == 'pull_request'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PULL: ${{ github.event.pull_request.number }}
+        run: |
+          pull="${RUNNER_TEMP}/pull-request.json"
+          event="${RUNNER_TEMP}/event.json"
+          gh api "repos/${GITHUB_REPOSITORY}/pulls/${PULL}" > "$pull"
+          jq --slurpfile pull "$pull" \
+            '.pull_request.title = $pull[0].title | .pull_request.body = $pull[0].body' \
+            "$GITHUB_EVENT_PATH" > "$event"
+          echo "CI_EVENT_PATH=${event}" >> "$GITHUB_ENV"
 
       - name: Pull request title
         if: github.event_name == 'pull_request'
