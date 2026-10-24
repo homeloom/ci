@@ -41,6 +41,7 @@ def title_problem(title: str, types: list[str], max_length: int = MAX_LENGTH) ->
 
 
 def main(argv: list[str] | None = None) -> int:
+    """Run the title check from the command line."""
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--types", default=DEFAULT_TYPES)
     parser.add_argument("--max-length", type=int, default=MAX_LENGTH)

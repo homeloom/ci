@@ -1,9 +1,9 @@
-# Weekly updates, grouped into one pull request per ecosystem. The composite
-# actions under actions/ pin actions too, so they are scanned as well.
+# Weekly updates, grouped into one pull request per ecosystem. The tools in
+# actions/setup-tools/install.sh are not covered: see the README.
 version: 2
 updates:
   - package-ecosystem: github-actions
-    directories: ["/", "/actions/*"]
+    directory: /
     schedule:
       interval: weekly
     commit-message:

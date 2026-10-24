@@ -62,7 +62,7 @@ def test_expression_allowed(expression: str, expected: bool | None) -> None:
                     "Programming Language :: Python",
                 ]
             },
-            "Apache-2.0 OR BSD",
+            "Apache-2.0 AND BSD",
         ),
         (
             {"Classifier": ["License :: CC0 1.0 Universal (CC0 1.0) Public Domain Dedication"]},
@@ -126,8 +126,19 @@ def test_install_command(tmp_path: Path, monkeypatch) -> None:
     assert command[:3] == ["uv", "pip", "install"]
     assert "--target" in command
     assert command[command.index("--python-version") + 1] == "3.14"
+    assert "--no-config" in command
     assert command[-2:] == ["--requirement", str(tmp_path / "req.txt")]
-    assert "lib==1.0" in command
+    assert "lib==1.0" not in command
+    listing = Path(command[command.index("--requirement") + 1])
+    assert listing.read_text(encoding="utf-8") == "lib==1.0\n"
+
+
+def test_install_rejects_options_in_requirements(tmp_path: Path, monkeypatch) -> None:
+    calls = []
+    monkeypatch.setattr(licenses.subprocess, "run", lambda command, check: calls.append(command))
+    with pytest.raises(ValueError, match="Invalid manifest requirement"):
+        licenses.install(["--index-url=https://pkgs.example.com"], [], tmp_path / "site", "3.14")
+    assert calls == []
 
 
 def test_main_license_file(tmp_path: Path, capsys) -> None:

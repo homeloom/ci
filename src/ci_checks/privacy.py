@@ -2,12 +2,21 @@
 
 Two kinds of checks run:
 
-* Generic patterns (private IP addresses, e-mail addresses, phone numbers,
-  URLs outside an allowlist, home directory paths, MAC addresses and
-  geographic coordinates). A line can opt out of one category with a
+* Generic patterns: private IP addresses, e-mail addresses that are not
+  noreply, phone numbers, URLs outside an allowlist, home directory paths,
+  MAC addresses, Zigbee and Thread device addresses, and geographic
+  coordinates. A line can opt out of one category with a
   `ci-allow: <category>` comment, and paths can be excluded with globs.
 * A denylist of terms read from the PRIVACY_DENYLIST environment variable,
   one term per line. It applies everywhere and cannot be opted out of.
+
+What is scanned:
+
+* every tracked file and file path of the checked out tree;
+* every line added by the commits of the pull request or push, including
+  lines that a later commit removes, because those commits stay reachable;
+* the author, committer and message of every commit in the history;
+* the pull request title, body and branch name.
 
 Findings only report where something was found, never the matched text,
 so that the log does not repeat the data it is protecting.
@@ -21,20 +30,28 @@ import os
 import re
 import sys
 import unicodedata
-from collections.abc import Iterable
-from pathlib import Path
+from collections.abc import Iterable, Iterator
+from pathlib import Path, PurePosixPath
 
 from ci_checks._common import (
+    MAX_SCAN_BYTES,
+    Addition,
+    CheckError,
     Commit,
     PullRequest,
     Reporter,
+    additions,
     allowed_by_pragma,
     commits,
+    fail,
     history_tip,
     load_event,
     matches_any,
+    new_commit_range,
     pull_request,
+    read_bytes,
     read_text,
+    require_full_history,
     split_list,
     tracked_files,
 )
@@ -82,35 +99,75 @@ PRIVATE_NETWORKS = tuple(
         "fc00::/7",
     )
 )
-# Placeholder MAC addresses commonly used in documentation and tests.
-PLACEHOLDER_MACS = {
-    "00:00:00:00:00:00",
-    "00:11:22:33:44:55",
-    "01:23:45:67:89:ab",
-    "11:22:33:44:55:66",
-    "12:34:56:78:90:ab",
-    "aa:bb:cc:dd:ee:ff",
-    "ff:ff:ff:ff:ff:ff",
+# Hardware addresses that are obviously placeholders.
+PLACEHOLDER_HEX = {
+    "0011223344556677",
+    "001122334455",
+    "0123456789ab",
+    "0123456789abcdef",
+    "112233445566",
+    "1122334455667788",
+    "123456789abc",
+    "1234567890ab",
+    "aabbccddeeff",
+    "aabbccddeeff0011",
 }
 # Coordinates used by the Home Assistant test harness.
 PLACEHOLDER_COORDINATES = {"32.87336", "-117.22743", "0.0", "0.00", "0.000"}
-HOME_DIRECTORY_PLACEHOLDERS = {"runner", "user", "username", "me", "name", "public", "default"}
+HOME_DIRECTORY_PLACEHOLDERS = {
+    "admin",
+    "app",
+    "codespace",
+    "default",
+    "example",
+    "ha",
+    "homeassistant",
+    "me",
+    "name",
+    "node",
+    "pi",
+    "public",
+    "root",
+    "runner",
+    "ubuntu",
+    "user",
+    "username",
+    "vscode",
+    "you",
+}
+LICENSE_PREFIXES = ("LICENSE", "LICENCE", "COPYING", "NOTICE")
 
 _IPV4 = re.compile(r"(?<![\w.])(\d{1,3}(?:\.\d{1,3}){3})(?!\w|\.\d)")
 _IPV6_ULA = re.compile(r"(?<![\w:])(f[cd][0-9a-f]{2}:[0-9a-f:]*[0-9a-f])(?![\w:])", re.IGNORECASE)
-_EMAIL = re.compile(r"[A-Za-z0-9._%+-]+@([A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,})\b")
-_URL = re.compile(r"https?://([^\s/?#\"'<>()\[\]{}\\`|]*)", re.IGNORECASE)
+_EMAIL = re.compile(
+    r"(?<![A-Za-z0-9._%+-])[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}\b"
+)
+_URL = re.compile(r"https?://(?:[^\s/@\"'<>]*@)?(\[[0-9A-Fa-f:.]*\]|[A-Za-z0-9.-]*)", re.IGNORECASE)
 _PHONE_INTERNATIONAL = re.compile(r"(?<![\w+])\+\d{1,3}(?:[ .-]?\(?\d{1,4}\)?){2,6}(?![\w])")
 _PHONE_NATIONAL = re.compile(r"(?<![\w.])(?:0[1-9](?:[ .-]\d{2}){4}|0[67]\d{8})(?![\w.])")
-_HOME_PATH = re.compile(r"(?:/home|/Users|[A-Za-z]:\\{1,2}Users)[/\\]{1,2}([A-Za-z0-9._-]+)")
+_HOME_PATH = re.compile(
+    r"(?<![\w.~%-])(?:/home|/Users|[A-Za-z]:\\{1,2}Users)[/\\]{1,2}([A-Za-z0-9._-]+)"
+)
 _MAC = re.compile(r"(?<![0-9A-Fa-f:-])((?:[0-9A-Fa-f]{2}[:-]){5}[0-9A-Fa-f]{2})(?![0-9A-Fa-f:-])")
+_EUI64 = re.compile(r"(?<![\w:])(0x[0-9A-Fa-f]{16}|(?:[0-9A-Fa-f]{2}:){7}[0-9A-Fa-f]{2})(?![\w:])")
 _COORDINATE = re.compile(
     r"\b(?:lat|latitude|lon|lng|long|longitude)[\"']?\s*[:=]\s*[\"']?(-?\d{1,3}\.\d{3,})",
     re.IGNORECASE,
 )
-_NOREPLY_LOCAL = re.compile(r"^(?:[\w.+-]*[._+-])?no-?reply(?:[._+-][\w.+-]*)?$", re.IGNORECASE)
+_NOREPLY_LOCAL = re.compile(
+    r"^(?:[\w.+-]*[._+-])?(?:no-?reply|do-?not-?reply)(?:[._+-][\w.+-]*)?$", re.IGNORECASE
+)
 
-CATEGORIES = ("private-ip", "email", "phone", "url", "home-path", "mac", "coordinates")
+CATEGORIES = (
+    "private-ip",
+    "email",
+    "phone",
+    "url",
+    "home-path",
+    "mac",
+    "device-id",
+    "coordinates",
+)
 
 
 def _domain_allowed(host: str, domains: Iterable[str]) -> bool:
@@ -127,6 +184,11 @@ def is_noreply_email(address: str) -> bool:
     return bool(_NOREPLY_LOCAL.match(local))
 
 
+def _is_placeholder_hex(value: str) -> bool:
+    digits = re.sub(r"^0x|[:-]", "", value.lower())
+    return len(set(digits)) <= 2 or digits in PLACEHOLDER_HEX
+
+
 def _private_ip(text: str) -> bool:
     candidates = [m.group(1) for m in _IPV4.finditer(text)]
     candidates += [m.group(1) for m in _IPV6_ULA.finditer(text)]
@@ -141,7 +203,12 @@ def _private_ip(text: str) -> bool:
 
 
 def _email(text: str) -> bool:
-    return any(not is_noreply_email(m.group(0)) for m in _EMAIL.finditer(text))
+    for match in _EMAIL.finditer(text):
+        if text[match.end() : match.end() + 1] == ":":
+            continue  # SSH remote such as git@github.com:owner/repo.
+        if not is_noreply_email(match.group(0)):
+            return True
+    return False
 
 
 def _phone(text: str) -> bool:
@@ -155,13 +222,11 @@ def _phone(text: str) -> bool:
 def _url(text: str, allowed_domains: Iterable[str]) -> bool:
     domains = tuple(allowed_domains) + RESERVED_DOMAINS
     for match in _URL.finditer(text):
-        authority = match.group(1).rpartition("@")[2]
-        host = authority.lower()
-        if host.startswith("["):
-            continue  # IPv6 literal, handled by the IP check.
-        host = host.split(":", 1)[0].rstrip(".")
-        if not host or "$" in host or "%" in host or "*" in host:
-            continue  # Placeholder or template.
+        host = match.group(1).lower().rstrip(".")
+        if not host or host.startswith("["):
+            continue  # Template, or IPv6 literal handled by the IP check.
+        if "." not in host:
+            continue  # Single label such as http://supervisor/ in an app.
         try:
             ipaddress.ip_address(host)
             continue  # IP literal, handled by the IP check.
@@ -181,10 +246,14 @@ def _home_path(text: str) -> bool:
 def _mac(text: str) -> bool:
     for match in _MAC.finditer(text):
         mac = match.group(1).lower().replace("-", ":")
-        if mac in PLACEHOLDER_MACS or mac.startswith("00:00:5e:00:53:"):
-            continue  # RFC 7042 documentation range.
+        if _is_placeholder_hex(mac) or mac.startswith("00:00:5e:00:53:"):
+            continue  # Placeholder, or the RFC 7042 documentation range.
         return True
     return False
+
+
+def _device_id(text: str) -> bool:
+    return any(not _is_placeholder_hex(m.group(1)) for m in _EUI64.finditer(text))
 
 
 def _coordinates(text: str) -> bool:
@@ -200,20 +269,44 @@ def generic_findings(text: str, allowed_domains: Iterable[str]) -> list[str]:
         "url": lambda value: _url(value, allowed_domains),
         "home-path": _home_path,
         "mac": _mac,
+        "device-id": _device_id,
         "coordinates": _coordinates,
     }
     return [name for name, check in checks.items() if check(text)]
 
 
+# Letters that Unicode does not decompose into a base letter and an accent.
+_FOLD = str.maketrans(
+    {
+        "\u00f8": "o",  # o with stroke
+        "\u00e6": "ae",
+        "\u0153": "oe",
+        "\u0142": "l",  # l with stroke
+        "\u0111": "d",  # d with stroke
+        "\u00f0": "d",  # eth
+        "\u00fe": "th",  # thorn
+        "\u0131": "i",  # dotless i
+        "\u2018": "'",
+        "\u2019": "'",
+        "\u02bc": "'",
+    }
+)
+
+
 def normalize(text: str) -> str:
-    """Fold case and strip accents so that spelling variants still match."""
+    """Fold case, accents and special letters so that spelling variants match."""
     decomposed = unicodedata.normalize("NFKD", text)
     stripped = "".join(char for char in decomposed if not unicodedata.combining(char))
-    return stripped.casefold()
+    return stripped.casefold().translate(_FOLD)
 
 
 class Denylist:
-    """Terms that must never appear, matched on word boundaries."""
+    """Terms that must never appear.
+
+    Matching ignores case and accents, respects word boundaries, and lets
+    the words of a term be separated by any punctuation, underscores or line
+    breaks, so that "first last" also matches "first_last" and "First-Last".
+    """
 
     def __init__(self, raw: str) -> None:
         terms = []
@@ -222,20 +315,51 @@ class Denylist:
             if term and not term.startswith("#"):
                 terms.append(term)
         self.terms = terms
-        if terms:
-            parts = sorted({re.escape(normalize(t)).replace(r"\ ", r"\s+") for t in terms}, key=len)
-            alternation = "|".join(reversed(parts))
-            self._pattern: re.Pattern[str] | None = re.compile(
-                rf"(?<![a-z0-9])(?:{alternation})(?![a-z0-9])"
-            )
-        else:
-            self._pattern = None
+        patterns = set()
+        for term in terms:
+            words = [word for word in re.split(r"[\W_]+", normalize(term)) if word]
+            if words:
+                patterns.add(r"[\W_]+".join(map(re.escape, words)))
+        self._pattern: re.Pattern[str] | None = None
+        if patterns:
+            alternation = "|".join(sorted(patterns, key=len, reverse=True))
+            self._pattern = re.compile(rf"(?<![^\W_])(?:{alternation})(?![^\W_])")
 
     def __bool__(self) -> bool:
         return self._pattern is not None
 
     def matches(self, text: str) -> bool:
+        """Return whether a piece of text contains a term."""
         return bool(self._pattern and self._pattern.search(normalize(text)))
+
+    def matching_lines(self, text: str) -> list[int]:
+        """Return the line numbers where a term starts, terms spanning lines included."""
+        if not self._pattern:
+            return []
+        folded = normalize(text)
+        lines = {
+            folded.count("\n", 0, match.start()) + 1 for match in self._pattern.finditer(folded)
+        }
+        return sorted(lines)
+
+    def redact_path(self, path: str) -> str:
+        """Return a path with the parts that contain a term replaced."""
+        parts = ["[redacted]" if self.matches(part) else part for part in PurePosixPath(path).parts]
+        redacted = "/".join(parts)
+        return "[redacted path]" if self.matches(redacted) else redacted
+
+    def mask_values(self) -> set[str]:
+        """Return the spellings of each term that the runner should mask in logs."""
+        values = set()
+        for term in self.terms:
+            for variant in (term, term.lower(), term.upper(), term.title(), normalize(term)):
+                values.update({variant, variant.replace(" ", "_"), variant.replace(" ", "-")})
+        return {value for value in values if len(value) >= 3}
+
+
+def is_license_file(path: str) -> bool:
+    """Return whether a path is a license text, which quotes its authors' sites."""
+    return PurePosixPath(path).name.upper().startswith(LICENSE_PREFIXES)
 
 
 class PrivacyCheck:
@@ -255,29 +379,95 @@ class PrivacyCheck:
         self.exclude = tuple(exclude)
         self.reporter = reporter
 
-    def check_files(self, paths: Iterable[str]) -> None:
-        for path in paths:
-            if self.denylist.matches(path):
-                self.reporter.error("File path contains a denylisted term.", path)
-            text = read_text(self.root / path)
-            if text is None:
-                continue
-            generic = not matches_any(path, self.exclude)
-            for number, line in enumerate(text.splitlines(), start=1):
-                if self.denylist.matches(line):
-                    self.reporter.error("Line contains a denylisted term.", path, number)
-                if not generic:
-                    continue
-                for category in generic_findings(line, self.allowed_domains):
-                    if not allowed_by_pragma(line, category):
-                        self.reporter.error(
-                            f"Possible personal data ({category}). Remove it, or add "
-                            f"`ci-allow: {category}` to the line if it is not personal.",
-                            path,
-                            number,
-                        )
+    def _generic_applies(self, path: str) -> bool:
+        return not matches_any(path, self.exclude) and not is_license_file(path)
 
-    def check_commits(self, history: Iterable[Commit]) -> None:
+    def _location(self, path: str) -> tuple[str, str | None]:
+        """Return the path to show and the path to annotate, hiding denylisted parts."""
+        if self.denylist.matches(path):
+            return self.denylist.redact_path(path), None
+        return path, path
+
+    def _report_line(self, path: str, number: int, line: str) -> None:
+        shown, annotated = self._location(path)
+        for category in generic_findings(line, self.allowed_domains):
+            if not allowed_by_pragma(line, category):
+                self.reporter.error(
+                    f"{shown}:{number}: possible personal data ({category}). Remove it, or "
+                    f"add `ci-allow: {category}` to the line if it is not personal.",
+                    annotated,
+                    number,
+                )
+
+    def check_files(self, paths: Iterable[str]) -> None:
+        """Check file paths, symbolic link targets and file contents."""
+        for path in paths:
+            shown, annotated = self._location(path)
+            if annotated is None:
+                self.reporter.error(f"{shown}: the file path contains a denylisted term.")
+            full = self.root / path
+            if full.is_symlink():
+                self._check_symlink(path, str(full.readlink()))
+                continue
+            data = read_bytes(full, MAX_SCAN_BYTES)
+            if data is None:
+                if full.exists():
+                    self.reporter.warning(
+                        f"{shown}: larger than {MAX_SCAN_BYTES} bytes, not scanned."
+                    )
+                continue
+            for number in self.denylist.matching_lines(data.decode("utf-8", errors="replace")):
+                self.reporter.error(f"{shown}:{number}: denylisted term.", annotated, number)
+            text = read_text(full)
+            if text is None or not self._generic_applies(path):
+                continue
+            for number, line in enumerate(text.splitlines(), start=1):
+                self._report_line(path, number, line)
+
+    def _check_symlink(self, path: str, target: str) -> None:
+        shown, annotated = self._location(path)
+        if self.denylist.matches(target):
+            self.reporter.error(f"{shown}: the link target contains a denylisted term.", annotated)
+        if self._generic_applies(path):
+            for category in generic_findings(target, self.allowed_domains):
+                self.reporter.error(
+                    f"{shown}: the link target may contain personal data ({category}).",
+                    annotated,
+                )
+
+    def check_additions(self, added: Iterable[Addition], bots: set[str]) -> None:
+        """Check lines added by new commits, including lines removed later.
+
+        Lines that are still in the file at the same place were already
+        checked with the files, so they are not reported twice.
+        """
+        current: dict[str, list[str]] = {}
+        for addition in added:
+            if addition.path not in current:
+                text = read_text(self.root / addition.path)
+                current[addition.path] = text.splitlines() if text is not None else []
+            lines = current[addition.path]
+            if 0 < addition.line <= len(lines) and lines[addition.line - 1] == addition.text:
+                continue
+            short = addition.sha[:12]
+            shown, _ = self._location(addition.path)
+            if self.denylist.matches(addition.path):
+                self.reporter.error(f"Commit {short}: a file path contains a denylisted term.")
+            if self.denylist.matches(addition.text):
+                self.reporter.error(
+                    f"Commit {short}: {shown}: an added line has a denylisted term."
+                )
+            if addition.sha in bots or not self._generic_applies(addition.path):
+                continue
+            for category in generic_findings(addition.text, self.allowed_domains):
+                if not allowed_by_pragma(addition.text, category):
+                    self.reporter.error(
+                        f"Commit {short}: {shown}: an added line may contain personal "
+                        f"data ({category}), even if a later commit removed it."
+                    )
+
+    def check_identities(self, history: Iterable[Commit]) -> None:
+        """Check authors, committers and messages of the whole history against the denylist."""
         for commit in history:
             identities = (
                 ("author", commit.author_name, commit.author_email),
@@ -294,12 +484,22 @@ class PrivacyCheck:
                     )
             if self.denylist.matches(commit.message):
                 self.reporter.error(f"Commit {commit.short}: message contains a denylisted term.")
+
+    def check_messages(self, new_commits: Iterable[Commit]) -> None:
+        """Check the messages of new commits with the generic patterns.
+
+        Bot commits are skipped: their trailers carry service addresses.
+        """
+        for commit in new_commits:
+            if commit.is_bot:
+                continue
             for category in generic_findings(commit.message, self.allowed_domains):
                 self.reporter.error(
                     f"Commit {commit.short}: message may contain personal data ({category})."
                 )
 
     def check_pull_request(self, pr: PullRequest) -> None:
+        """Check the pull request title, body and branch name."""
         fields = (("title", pr.title), ("body", pr.body), ("branch name", pr.head_ref))
         for name, value in fields:
             if self.denylist.matches(value):
@@ -313,13 +513,14 @@ class PrivacyCheck:
                 self.reporter.error(f"Pull request {name} may contain personal data ({category}).")
 
 
-def mask_terms(denylist: Denylist) -> None:
-    """Ask the runner to mask each term in case another tool prints it."""
-    for term in denylist.terms:
-        print(f"::add-mask::{term}")
+def mask_terms(denylist: Denylist) -> Iterator[str]:
+    """Yield the workflow commands that mask each spelling of each term."""
+    for value in sorted(denylist.mask_values()):
+        yield f"::add-mask::{value}"
 
 
 def main(argv: list[str] | None = None) -> int:
+    """Run the privacy check from the command line."""
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--root", type=Path, default=Path.cwd())
     parser.add_argument("--allowed-domains", default="", help="extra domains allowed in URLs")
@@ -334,18 +535,25 @@ def main(argv: list[str] | None = None) -> int:
 
     reporter = Reporter("Privacy")
     denylist = Denylist(os.environ.get("PRIVACY_DENYLIST", ""))
+    for command in mask_terms(denylist):
+        print(command)
     event = load_event()
     pr = pull_request(event)
-    if denylist:
-        mask_terms(denylist)
-    elif pr is not None and pr.from_fork:
-        reporter.warning("PRIVACY_DENYLIST is not available to forks; the denylist was skipped.")
-    elif args.require_denylist == "true":
-        reporter.error(
-            "PRIVACY_DENYLIST is empty. Pass the organization secret to the workflow, "
-            "or set require-denylist to false."
-        )
+    if not denylist:
+        if pr is not None and pr.from_fork:
+            reporter.warning(
+                "PRIVACY_DENYLIST is not available to forks; the denylist was skipped."
+            )
+        elif args.require_denylist == "true":
+            reporter.error(
+                "PRIVACY_DENYLIST is empty. Pass the organization secret to the workflow, "
+                "or set require-denylist to false."
+            )
 
+    try:
+        require_full_history(args.root)
+    except CheckError as err:
+        return fail(str(err))
     check = PrivacyCheck(
         args.root,
         denylist,
@@ -354,7 +562,11 @@ def main(argv: list[str] | None = None) -> int:
         reporter,
     )
     check.check_files(tracked_files(args.root))
-    check.check_commits(commits(args.root, [history_tip(event)]))
+    new_range = new_commit_range(event, args.root)
+    new = commits(args.root, new_range)
+    check.check_additions(additions(args.root, new_range), {c.sha for c in new if c.is_bot})
+    check.check_identities(commits(args.root, [history_tip(event)]))
+    check.check_messages(new)
     if pr is not None:
         check.check_pull_request(pr)
     return reporter.finish()

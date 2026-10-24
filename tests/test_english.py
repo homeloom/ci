@@ -18,6 +18,7 @@ from helpers import Repo, pr_event
         "Le capteur est hors ligne",
         "C\u2019est une tâche ménagère",
         "Il faut vérifier",
+        "Ce que les gens pour la plupart",
     ],
 )
 def test_french_detected(text: str) -> None:
@@ -34,6 +35,9 @@ def test_french_detected(text: str) -> None:
         "Run the tests on par with upstream",
         "",
         "1234 5678",
+        "Set la and le in the config",
+        "Use des_valeur_2 or le_capteur_id as keys",
+        "A modifier, a correction, a nouveau riche",
     ],
 )
 def test_english_accepted(text: str) -> None:
@@ -47,6 +51,9 @@ def test_english_accepted(text: str) -> None:
         ("custom_components/demo/translations/en.json", False),
         ("custom_components/demo/translations/en-GB.json", False),
         ("translations/de.json", True),
+        ("demo/translations/fr.yaml", True),
+        ("translations/fr.yml", True),
+        ("demo/translations/en.yaml", False),
         ("app/locales/fr/messages.json", True),
         ("app/locales/en/messages.json", False),
         ("po/fr.po", True),
@@ -70,7 +77,7 @@ def test_check_files(repo: Repo, capsys) -> None:
         repo.root, ["a.py", "b.py", "custom_components/demo/translations/fr.json"], reporter
     )
     assert reporter.count == 1
-    assert "file=a.py,line=2::Line looks French." in capsys.readouterr().out
+    assert "file=a.py,line=2::Line looks French (or another language" in capsys.readouterr().out
 
 
 def test_check_messages(repo: Repo, capsys) -> None:
@@ -90,6 +97,18 @@ def test_check_messages(repo: Repo, capsys) -> None:
     assert "Pull request body looks French." in out
 
 
+def test_bot_commits_are_skipped(repo: Repo) -> None:
+    base = repo.commit("chore: initial")
+    head = repo.commit(
+        "chore(deps): bump x\n\nNotes de version : la mise à jour",
+        name="dependabot[bot]",
+        email="49699333+dependabot[bot]@users.noreply.github.com",
+    )
+    reporter = Reporter("English")
+    english.check_messages(repo.root, pr_event(base, head, bot=True), reporter)
+    assert reporter.count == 0
+
+
 def test_bot_body_is_skipped(repo: Repo) -> None:
     head = repo.commit("chore: initial")
     reporter = Reporter("English")
@@ -107,3 +126,13 @@ def test_main(repo: Repo, event, capsys) -> None:
     assert english.main(["--root", str(repo.root), "--exclude", "vendor/*"]) == 0
     assert english.main(["--root", str(repo.root)]) == 1
     assert "English: 1 problem(s) found." in capsys.readouterr().out
+
+
+def test_main_rejects_shallow_clones(repo: Repo, event, tmp_path, capsys) -> None:
+    repo.commit()
+    repo.commit()
+    clone = tmp_path / "shallow"
+    repo.git("clone", "--quiet", "--depth=1", f"file://{repo.root}", str(clone))
+    event({})
+    assert english.main(["--root", str(clone)]) == 1
+    assert "fetch-depth: 0" in capsys.readouterr().err

@@ -61,16 +61,43 @@ jobs:
       - name: Run tests
         run: python -m pytest
 
+      - name: Install actionlint
+        if: ${{ !cancelled() }}
+        uses: $/actions/setup-tools
+        with:
+          tools: actionlint
+
+      # The templates are not workflows of this repository, so the hygiene job
+      # does not lint them. Their placeholder pins are replaced for the check.
+      - name: Lint workflow templates
+        if: ${{ !cancelled() }}
+        run: |
+          for workflows in templates/*/.github/workflows; do
+            work="${RUNNER_TEMP}/${workflows%%/.github/*}"
+            mkdir -p "$work/.github"
+            cp -r "$workflows" "$work/.github/"
+            sed -i 's/REPLACE_WITH_RELEASE_SHA/0000000000000000000000000000000000000000/' \
+              "$work"/.github/workflows/*.yml
+            (cd "$work" && git init --quiet && actionlint -color)
+          done
+
   report:
     name: Report
-    if: ${{ !cancelled() && github.event.pull_request.draft != true }}
+    # Always runs, so that a draft or cancelled run shows a failed Report
+    # rather than a skipped one, which branch protection would count as passed.
+    if: always()
     needs: [hygiene, lint, tests]
     runs-on: ubuntu-24.04
     timeout-minutes: 2
     steps:
       - name: Check results
         env:
+          DRAFT: ${{ github.event.pull_request.draft == true }}
           NEEDS: ${{ toJSON(needs) }}
         run: |
+          if [[ "$DRAFT" == "true" ]]; then
+            echo "::error::Draft pull request: CI was skipped. Mark it ready for review to run it."
+            exit 1
+          fi
           jq -r 'to_entries[] | "\(.key): \(.value.result)"' <<< "$NEEDS"
           jq -e 'all(.[]; .result == "success")' <<< "$NEEDS" > /dev/null

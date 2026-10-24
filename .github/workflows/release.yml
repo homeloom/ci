@@ -1,4 +1,4 @@
-name: Release
+name: Publish release
 
 # Publish a release for a commit of the default branch whose CI passed.
 # Call it from a workflow triggered by workflow_run after CI completes.

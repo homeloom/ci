@@ -1,8 +1,9 @@
 name: Privacy
 description: >-
-  Scan files, the whole commit history and the pull request text for secrets
-  and personal data. The denylist is read from the PRIVACY_DENYLIST
-  environment variable, which the calling step sets from a secret.
+  Scan the files, the commits and the pull request text for secrets and
+  personal data. Needs a checkout with fetch-depth 0. The denylist is read
+  from the PRIVACY_DENYLIST environment variable, which the calling step sets
+  from a secret.
 inputs:
   allowed-domains:
     description: Extra domains allowed in URLs, separated by spaces or commas.
@@ -16,15 +17,9 @@ inputs:
 runs:
   using: composite
   steps:
-    - name: Install gitleaks
-      uses: $/actions/setup-tools
-      with:
-        tools: gitleaks
-    - name: Scan history for secrets
-      shell: bash
-      run: gitleaks git --no-banner --redact --exit-code 1 .
+    # The personal data scan runs first: it masks the denylisted terms for
+    # every later step of the job, including the gitleaks report.
     - name: Scan for personal data
-      if: ${{ !cancelled() }}
       shell: bash
       env:
         ALLOWED_DOMAINS: ${{ inputs.allowed-domains }}
@@ -36,3 +31,15 @@ runs:
         --allowed-domains "$ALLOWED_DOMAINS"
         --exclude "$EXCLUDE"
         --require-denylist "$REQUIRE_DENYLIST"
+    - name: Install gitleaks
+      if: ${{ !cancelled() }}
+      uses: $/actions/setup-tools
+      with:
+        tools: gitleaks
+    - name: Scan history for secrets
+      if: ${{ !cancelled() }}
+      shell: bash
+      env:
+        # The history of the pull request head, or of the pushed commit.
+        TIP: ${{ github.event.pull_request.head.sha || 'HEAD' }}
+      run: gitleaks git --no-banner --redact --verbose --log-opts="$TIP" .

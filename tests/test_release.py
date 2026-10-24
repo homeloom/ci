@@ -88,6 +88,6 @@ def test_main(tmp_path: Path, capsys) -> None:
     assert capsys.readouterr().out == "- Beta.\n"
 
     assert release.main([*root, "notes", "--version", "3.0.0"]) == 1
-    assert "::error::The changelog has no section for 3.0.0." in capsys.readouterr().out
+    assert "::error::The changelog has no section for 3.0.0." in capsys.readouterr().err
 
     assert release.main([*root, "version", "--file", "missing.json"]) == 1

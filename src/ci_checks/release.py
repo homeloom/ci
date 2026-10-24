@@ -14,6 +14,8 @@ import sys
 import tomllib
 from pathlib import Path
 
+from ci_checks._common import fail
+
 VERSION = re.compile(r"^\d+\.\d+\.\d+(?:[-.]?(?:a|b|rc|alpha|beta|dev)\.?\d*)?$")
 PRERELEASE = re.compile(r"[a-z]", re.IGNORECASE)
 _YAML_VERSION = re.compile(r"""^version:\s*["']?([^"'\s#]+)["']?\s*(?:#.*)?$""", re.MULTILINE)
@@ -24,6 +26,7 @@ class ReleaseError(Exception):
 
 
 def find_version_file(root: Path) -> Path:
+    """Return the only integration manifest of the repository."""
     manifests = sorted(root.glob("custom_components/*/manifest.json"))
     if len(manifests) != 1:
         raise ReleaseError(
@@ -68,6 +71,7 @@ def release_notes(changelog: str, version: str) -> str:
 
 
 def main(argv: list[str] | None = None) -> int:
+    """Print the version or the release notes."""
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--root", type=Path, default=Path.cwd())
     commands = parser.add_subparsers(dest="command", required=True)
@@ -88,8 +92,9 @@ def main(argv: list[str] | None = None) -> int:
             changelog = (args.root / args.changelog).read_text(encoding="utf-8")
             print(release_notes(changelog, args.version), end="")
     except (OSError, ReleaseError, ValueError) as err:
-        print(f"::error::{err}")
-        return 1
+        # Standard output is captured into step outputs and notes; errors go
+        # to standard error so that they show in the log.
+        return fail(str(err))
     return 0
 
 

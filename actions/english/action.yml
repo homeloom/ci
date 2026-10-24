@@ -1,7 +1,7 @@
 name: English
 description: >-
   Reject French text outside translation files, in pull request text and in
-  the messages of new commits.
+  the messages of new commits. Needs a checkout with fetch-depth 0.
 inputs:
   exclude:
     description: Globs of files to skip, separated by spaces or commas.

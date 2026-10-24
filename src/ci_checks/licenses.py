@@ -20,7 +20,7 @@ from collections.abc import Iterable
 from email.parser import HeaderParser
 from pathlib import Path
 
-from ci_checks._common import Reporter, split_list
+from ci_checks._common import Reporter, fail, split_list
 
 LICENSE_FILES = ("LICENSE", "LICENSE.md", "LICENSE.txt", "COPYING")
 LICENSE_FINGERPRINTS = {
@@ -82,6 +82,7 @@ PLATFORM = "x86_64-manylinux_2_28"
 
 
 def find_license_file(root: Path) -> Path | None:
+    """Return the license file at the root of the repository, if any."""
     for name in LICENSE_FILES:
         if (root / name).is_file():
             return root / name
@@ -177,7 +178,9 @@ def license_of(metadata: str) -> str | None:
         if name in CLASSIFIERS:
             found.append(CLASSIFIERS[name])
     if found:
-        return " OR ".join(sorted(set(found)))
+        # Several classifiers may mean a choice or a combination; assume the
+        # stricter combination. Reviewed packages go in the exceptions.
+        return " AND ".join(sorted(set(found)))
     text = (headers.get("License") or "").strip()
     if not text or text.upper() == "UNKNOWN":
         return None
@@ -206,19 +209,31 @@ def install(
     target: Path,
     python_version: str,
 ) -> None:
+    """Install requirements into a directory without running a Python interpreter on them.
+
+    Requirements go through a file so that none can be read as an option, and
+    the uv configuration of the checked out repository is ignored.
+    """
+    for requirement in requirements:
+        if requirement.lstrip().startswith("-"):
+            raise ValueError(f"Invalid manifest requirement: {requirement!r}")
+    listing = target.parent / "manifest-requirements.txt"
+    listing.write_text("".join(f"{line}\n" for line in requirements), encoding="utf-8")
     command = [
         "uv",
         "pip",
         "install",
         "--quiet",
         "--no-progress",
+        "--no-config",
         "--target",
         str(target),
         "--python-version",
         python_version,
         "--python-platform",
         PLATFORM,
-        *requirements,
+        "--requirement",
+        str(listing),
     ]
     for path in files:
         command += ["--requirement", str(path)]
@@ -243,6 +258,7 @@ def check_dependencies(
     exceptions: Iterable[str],
     reporter: Reporter,
 ) -> None:
+    """Report distributions whose license is unknown or not allowed."""
     exempt = {normalize_name(name) for name in exceptions}
     for name, version, spdx in distributions:
         if normalize_name(name) in exempt:
@@ -261,6 +277,7 @@ def check_dependencies(
 
 
 def main(argv: list[str] | None = None) -> int:
+    """Run the license check from the command line."""
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--root", type=Path, default=Path.cwd())
     parser.add_argument("--license", default="MIT", help="expected SPDX id of the repository")
@@ -289,8 +306,11 @@ def main(argv: list[str] | None = None) -> int:
     if requirements or files:
         allowed = frozenset(split_list(args.allowed)) or DEFAULT_ALLOWED
         with tempfile.TemporaryDirectory() as directory:
-            target = Path(directory)
-            install(requirements, files, target, args.python_version)
+            target = Path(directory) / "site"
+            try:
+                install(requirements, files, target, args.python_version)
+            except (ValueError, subprocess.CalledProcessError) as err:
+                return fail(f"Could not resolve the runtime dependencies: {err}")
             check_dependencies(installed(target), allowed, split_list(args.exceptions), reporter)
     else:
         print("No runtime dependency declared.")

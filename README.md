@@ -10,7 +10,7 @@ the code and the history.
 
 | Path | What it is |
 | --- | --- |
-| `.github/workflows/hygiene.yml` | Pull request title, secrets and personal data, English, licenses, workflow lint. One job. |
+| `.github/workflows/hygiene.yml` | Pull request title, secrets and personal data, English and workflow lint in one job; licenses in a second job. |
 | `.github/workflows/python-lint.yml` | Ruff lint and format check. |
 | `.github/workflows/ha-tests.yml` | pytest on the oldest supported and the latest Home Assistant, with a coverage threshold. |
 | `.github/workflows/ha-integration.yml` | hassfest, plus HACS validation once the repository is public. |
@@ -30,9 +30,21 @@ requires. See [templates/README.md](templates/README.md).
 
 A typical integration CI calls four workflows and ends with a **Report** job
 that needs all of them. Branch protection requires Report only, so adding or
-removing a job never requires a settings change. Draft pull requests skip
-every job, Report included; marking the pull request ready for review starts
-one full run. Runs of the same pull request cancel each other.
+removing a job never requires a settings change.
+
+- Draft pull requests skip every job except Report, which fails in seconds
+  with "Draft pull request: CI was skipped". A skipped required check would
+  count as passed, so Report always runs and only passes when every job it
+  needs succeeded.
+- Marking the pull request ready for review starts one full run.
+- Editing the title or body starts a new run, because the title becomes the
+  squash commit message and both are checked for personal data.
+- Runs of the same pull request cancel each other.
+
+The composite actions in `actions/` can also be used on their own. The
+privacy and English actions read the history, so they need a checkout with
+`fetch-depth: 0`; on a shallow checkout they stop with an error instead of
+silently checking less.
 
 ### hygiene.yml
 
@@ -48,32 +60,68 @@ one full run. Runs of the same pull request cancel each other.
 | `license-exceptions` | | Packages exempted after a manual license review. |
 
 Secret: `PRIVACY_DENYLIST`, one term per line (lines starting with `#` are
-comments). Matching ignores case and accents and respects word boundaries.
+comments). Matching ignores case and accents, respects word boundaries and
+accepts any punctuation, underscore or line break between the words of a
+term, so `First Last` also matches `first_last` and `First-Last`. The common
+spellings of each term (as written, in lower, upper and title case, without
+accents, with underscores or hyphens) are masked in the job log before any
+other step runs.
 
-What it checks:
+The **Hygiene** job checks:
 
 - **Pull request title**: Conventional Commits, at most 100 characters.
-- **Secrets**: gitleaks over the whole history.
-- **Personal data**: private IP addresses, e-mail addresses that are not
-  noreply, phone numbers, URLs outside an allowlist, home directory paths,
-  MAC addresses and coordinates, in files, commit messages and the pull
-  request title and body. Commit authors and committers must use noreply
-  addresses. The denylist applies to all of that plus file paths and the
-  branch name. Findings report where, never what, so logs do not repeat the
-  data.
+- **Secrets**: gitleaks over the whole history of the pull request head.
+- **Personal data** with generic patterns: private IP addresses, e-mail
+  addresses that are not noreply, phone numbers, URLs outside an allowlist,
+  home directory paths, MAC addresses, Zigbee and Thread device addresses
+  (EUI-64) and coordinates. They apply to:
+  - every tracked text file and symbolic link target;
+  - every line added by the commits of the pull request or push, including
+    lines that a later commit removes, because those commits stay
+    reachable after the merge;
+  - the messages of those commits;
+  - the pull request title and body.
+- **Commit identities**: authors and committers of the whole history must
+  use noreply addresses.
+- **Denylist**: everything above, plus binary files up to 20 MB, file
+  paths, the commit authors, committers and messages of the whole history,
+  and the branch name.
 - **English**: French text outside translation files, in files, new commit
   messages and the pull request title and body.
-- **Licenses**: a LICENSE file, and allowed licenses for every runtime
-  dependency (manifest `requirements` and extra requirements files,
-  transitive dependencies included).
 - **Workflows**: actionlint with shellcheck.
+
+The **Licenses** job checks that the LICENSE file matches the expected
+license and that every runtime dependency (manifest `requirements` and
+extra requirements files, transitive dependencies included) has an allowed
+license. Installing packages may run their build code, so this job runs
+separately and never receives the denylist secret.
+
+Findings report where something was found, never what, so logs do not
+repeat the data. When a file path contains a denylisted term, the matching
+path segments are shown as `[redacted]`.
 
 A line that is not personal data despite matching a pattern can opt out of
 one category with a comment such as `# ci-allow: private-ip`. The categories
-are `private-ip`, `email`, `phone`, `url`, `home-path`, `mac`, `coordinates`
-and `french`. The denylist and gitleaks cannot be opted out of
+are `private-ip`, `email`, `phone`, `url`, `home-path`, `mac`, `device-id`,
+`coordinates` and `french`. The denylist and gitleaks cannot be opted out of
 (gitleaks has its own `gitleaks:allow` comment, which reviewers must
 question).
+
+Exemptions, kept narrow on purpose:
+
+- License files (`LICENSE*`, `LICENCE*`, `COPYING*`, `NOTICE*`) skip the
+  generic patterns, because license texts quote their authors' sites.
+- Commits authored by GitHub Apps such as Dependabot skip the generic
+  patterns for their added lines and messages, and their pull request body
+  skips them too, because these quote upstream release notes and carry
+  service addresses in trailers. The denylist still applies to them.
+- Fork pull requests do not receive secrets, so the denylist only warns
+  there.
+
+Limits: the generic patterns cannot recognize names, street addresses or
+public IP addresses, nor text inside images, archives or encoded data, and
+files larger than 20 MB are skipped with a warning. The denylist and the
+review cover what the patterns cannot.
 
 ### python-lint.yml
 
@@ -128,8 +176,11 @@ published as pre-releases.
 
 ## Organization settings
 
-- **Actions access**: this repository is accessible from repositories in
-  the organization (Settings, Actions, General, Access).
+- **Visibility**: GitHub only lets private repositories use workflows and
+  actions from a private repository. This repository must be made public
+  before the first repository that calls it becomes public.
+- **Actions access**: while private, this repository is accessible from
+  repositories in the organization (Settings, Actions, General, Access).
 - **Secrets**: `PRIVACY_DENYLIST` exists as an organization Actions secret
   and as an organization Dependabot secret, both available to every
   repository that calls `hygiene.yml`.
@@ -150,14 +201,20 @@ published as pre-releases.
 - The checks use the Python standard library only and run on the system
   Python of the runner, so the hygiene job installs nothing but its tools.
 - Cheap checks share one job, because GitHub bills each job by the started
-  minute.
+  minute. The license check is the exception: it installs third party
+  packages, so it runs in a job without secrets.
+- The hassfest and HACS actions are pinned by SHA, but they run container
+  images that their maintainers publish under moving tags. This is an
+  accepted risk: they are the official validators, and they run in a job
+  with a read-only token and no secrets.
 
 ## Maintenance
 
 - Dependabot updates the action pins and the test dependencies.
-- To update a tool, change its version and digest together in
-  `actions/setup-tools/install.sh`, using the checksums published with the
-  upstream release.
+- Dependabot does not see the tools in `actions/setup-tools/install.sh`
+  (actionlint, gitleaks, Ruff, uv). Check their releases when releasing
+  this repository; to update one, change its version and digest together,
+  using the checksums published with the upstream release.
 - To release this repository, bump `version` in `pyproject.toml` and add the
   matching `CHANGELOG.md` section. Releases are tagged automatically once CI
   passes on `main`.

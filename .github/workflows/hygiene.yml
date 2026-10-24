@@ -1,9 +1,11 @@
 name: Hygiene
 
-# Checks that apply to every repository, grouped in one job to save runner
-# minutes: pull request title, secrets and personal data, language, licenses
-# and workflow syntax. Every step runs even when an earlier one fails, so a
-# single run reports every problem.
+# Checks that apply to every repository. Pull request title, secrets and
+# personal data, language and workflow syntax share one job to save runner
+# minutes; every step runs even when an earlier one fails, so a single run
+# reports every problem. The license check installs third party packages,
+# which may run their build code, so it runs in its own job that never
+# receives the denylist secret.
 
 on:
   workflow_call:
@@ -81,15 +83,6 @@ jobs:
         with:
           exclude: ${{ inputs.english-exclude }}
 
-      - name: Licenses
-        if: ${{ !cancelled() }}
-        uses: $/actions/licenses
-        with:
-          license: ${{ inputs.license }}
-          requirements: ${{ inputs.license-requirements }}
-          allowed: ${{ inputs.license-allowed }}
-          exceptions: ${{ inputs.license-exceptions }}
-
       - name: Install actionlint
         if: ${{ !cancelled() }}
         uses: $/actions/setup-tools
@@ -99,3 +92,23 @@ jobs:
       - name: Lint workflows
         if: ${{ !cancelled() }}
         run: actionlint -color
+
+  licenses:
+    name: Licenses
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - name: Check out
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Licenses
+        uses: $/actions/licenses
+        with:
+          license: ${{ inputs.license }}
+          requirements: ${{ inputs.license-requirements }}
+          allowed: ${{ inputs.license-allowed }}
+          exceptions: ${{ inputs.license-exceptions }}

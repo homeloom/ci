@@ -1,9 +1,12 @@
 name: CI
 
 # CI of a repository of Home Assistant apps, built from the shared workflows of
-# homeloom/ci. Draft pull requests skip every job, Report included, to save
-# runner minutes; marking the pull request ready for review starts a full run.
-# Branch protection requires the Report job.
+# homeloom/ci. Branch protection requires the Report job.
+#
+# Draft pull requests skip every job except Report, which fails in seconds to
+# show that CI has not run; marking the pull request ready for review runs CI
+# once. Editing the title or body runs it again, because the title becomes the
+# commit message and both are checked for personal data.
 
 on:
   pull_request:
@@ -37,14 +40,21 @@ jobs:
 
   report:
     name: Report
-    if: ${{ !cancelled() && github.event.pull_request.draft != true }}
+    # Always runs, so that a draft or cancelled run shows a failed Report
+    # rather than a skipped one, which branch protection would count as passed.
+    if: always()
     needs: [hygiene, apps]
     runs-on: ubuntu-24.04
     timeout-minutes: 2
     steps:
       - name: Check results
         env:
+          DRAFT: ${{ github.event.pull_request.draft == true }}
           NEEDS: ${{ toJSON(needs) }}
         run: |
+          if [[ "$DRAFT" == "true" ]]; then
+            echo "::error::Draft pull request: CI was skipped. Mark it ready for review to run it."
+            exit 1
+          fi
           jq -r 'to_entries[] | "\(.key): \(.value.result)"' <<< "$NEEDS"
           jq -e 'all(.[]; .result == "success")' <<< "$NEEDS" > /dev/null
