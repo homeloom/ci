@@ -15,6 +15,11 @@ Capture = pytest.CaptureFixture[str]
 MIT_TEXT = "MIT License\n\nPermission is hereby granted, free of charge, to any person\n"
 
 
+def folded(*lines: str) -> str:
+    """Return a header value spread over several lines, as METADATA folds it."""
+    return "\n        ".join(lines)
+
+
 def metadata(name: str = "demo", version: str = "1.0", **headers: str | list[str]) -> str:
     lines = ["Metadata-Version: 2.4", f"Name: {name}", f"Version: {version}"]
     for key, value in headers.items():
@@ -34,6 +39,10 @@ def metadata(name: str = "demo", version: str = "1.0", **headers: str | list[str
         ("MIT AND GPL-3.0-only", False),
         ("(MIT OR GPL-2.0-only) AND Apache-2.0", True),
         ("Apache-2.0 WITH LLVM-exception", True),
+        ("Apache-2.0 WITH Commons-Clause", False),
+        ("MIT WITH LicenseRef-Non-Commercial OR BSD-3-Clause", True),
+        ("MIT-CMU", True),
+        ("Apache-2.0 AND CNRI-Python", True),
         ("GPL-2.0+", False),
         ("LGPL-2.1+", True),
         ("LGPL-3.0", True),
@@ -76,10 +85,151 @@ def test_expression_allowed(expression: str, expected: bool | None) -> None:
         ({"License": "GPL-3.0-only"}, "GPL-3.0-only"),
         ({"License": "UNKNOWN"}, None),
         ({}, None),
+        ({"License": "3-Clause BSD License"}, "BSD-3-Clause"),
+        ({"License": "BSD 3-Clause OR Apache-2.0"}, "BSD-3-Clause OR Apache-2.0"),
+        ({"License": "Apache 2.0"}, "Apache-2.0"),
+        ({"License": "ISC License (ISCL)"}, "ISC"),
+        ({"License": "The MIT License (MIT)"}, "MIT"),
+        ({"License": "Apache Licence v2.0 AND Simplified BSD"}, "Apache-2.0 AND BSD-2-Clause"),
+        # Unknown names and grouping parentheses are left as written.
+        ({"License": "MIT OR Bluefinch Public License"}, "MIT OR Bluefinch Public License"),
+        ({"License": "(BSD 3-Clause OR MIT) AND ISC"}, "(BSD 3-Clause OR MIT) AND ISC"),
+        ({"License": "MIT and Apache License"}, "MIT and Apache License"),
+        # Text naming a restriction or a copyleft license is never translated.
+        (
+            {"License": "Apache License 2.0 with Commons Clause v1.0"},
+            "Apache License 2.0 with Commons Clause v1.0",
+        ),
+        (
+            {"License": "GPL-3.0-only; bundled parser under the Apache License"},
+            "GPL-3.0-only; bundled parser under the Apache License",
+        ),
+        ({"License": "Apache 2.0, non-commercial use"}, "Apache 2.0, non-commercial use"),
+        ({"License": "BSD 3-Clause OR LGPLv3"}, "BSD 3-Clause OR LGPLv3"),
+        # Full license texts.
+        ({"License": folded("Permission is hereby granted,", "free of charge, to")}, "MIT"),
+        (
+            {
+                "License": folded(
+                    "Apache License",
+                    "TERMS AND CONDITIONS FOR USE, REPRODUCTION, AND DISTRIBUTION",
+                )
+            },
+            "Apache-2.0",
+        ),
+        (
+            {
+                "License": folded(
+                    "Licensed under the Apache License, Version 2.0 (the",
+                    '"License"); you may not use this file except in compliance',
+                )
+            },
+            "Apache-2.0",
+        ),
+        (
+            {
+                "License": folded(
+                    "Permission is hereby granted, free of charge, to any person",
+                    "Redistribution and use in source and binary forms, with or without",
+                )
+            },
+            "BSD AND MIT",
+        ),
+        (
+            {
+                "License": folded(
+                    "Permission is hereby granted, free of charge, to any person",
+                    "The parser is covered by the GNU General Public License.",
+                )
+            },
+            None,
+        ),
+        ({"License": folded("Copyright 2024 Bluefinch", "All rights reserved.")}, None),
     ],
 )
 def test_license_of(headers: dict, expected: str | None) -> None:
     assert licenses.license_of(metadata(**headers)) == expected
+
+
+OSI = "License :: OSI Approved :: "
+
+
+@pytest.mark.parametrize(
+    ("classifiers", "expected"),
+    [
+        (
+            [f"{OSI}MIT License", f"{OSI}GNU General Public License v3 (GPLv3)"],
+            "GPL-3.0-only AND MIT",
+        ),
+        (
+            [f"{OSI}MIT License", f"{OSI}GNU General Public License v3 or later (GPLv3+)"],
+            "GPL-3.0-or-later AND MIT",
+        ),
+        ([f"{OSI}GNU General Public License v2 or later (GPLv2+)"], "GPL-2.0-or-later"),
+        ([f"{OSI}GNU General Public License (GPL)"], "GPL-1.0-or-later"),
+        ([f"{OSI}GNU Library or Lesser General Public License (LGPL)"], "LGPL-2.0-or-later"),
+        (
+            [f"{OSI}GNU Affero General Public License v3 or later (AGPLv3+)"],
+            "AGPL-3.0-or-later",
+        ),
+        (
+            [f"{OSI}MIT License", "License :: Other/Proprietary License"],
+            "LicenseRef-Proprietary AND MIT",
+        ),
+        ([f"{OSI}Python License (CNRI Python License)"], "CNRI-Python"),
+        # A classifier without an SPDX identifier still counts.
+        (
+            [f"{OSI}MIT License", f"{OSI}Eclipse Public License 2.0 (EPL-2.0)"],
+            "LicenseRef-Eclipse-Public-License-2.0-EPL-2.0 AND MIT",
+        ),
+        # Classifiers that add no condition are ignored.
+        (["License :: DFSG approved", f"{OSI}MIT License"], "MIT"),
+        ([f"{OSI}BSD License", "License :: Public Domain"], "BSD"),
+    ],
+)
+def test_license_of_classifiers(classifiers: list[str], expected: str) -> None:
+    assert licenses.license_of(metadata(Classifier=classifiers)) == expected
+
+
+def test_license_of_neutral_classifier_keeps_license_field() -> None:
+    text = metadata(Classifier=["License :: OSI Approved"], License="LGPL-2.1-or-later")
+    assert licenses.license_of(text) == "LGPL-2.1-or-later"
+
+
+@pytest.mark.parametrize(
+    ("only", "or_later"),
+    [
+        (
+            "GNU General Public License v2 (GPLv2)",
+            "GNU General Public License v2 or later (GPLv2+)",
+        ),
+        (
+            "GNU General Public License v3 (GPLv3)",
+            "GNU General Public License v3 or later (GPLv3+)",
+        ),
+        (
+            "GNU Lesser General Public License v2 (LGPLv2)",
+            "GNU Lesser General Public License v2 or later (LGPLv2+)",
+        ),
+        (
+            "GNU Lesser General Public License v3 (LGPLv3)",
+            "GNU Lesser General Public License v3 or later (LGPLv3+)",
+        ),
+        (
+            "GNU Affero General Public License v3",
+            "GNU Affero General Public License v3 or later (AGPLv3+)",
+        ),
+    ],
+)
+def test_or_later_classifiers_get_the_same_verdict(only: str, or_later: str) -> None:
+    verdicts = {
+        licenses.expression_allowed(
+            licenses.license_of(metadata(Classifier=[f"{OSI}MIT License", f"{OSI}{name}"])) or "",
+            ALLOWED,
+        )
+        for name in (only, or_later)
+    }
+    assert len(verdicts) == 1
 
 
 def make_site(target: Path, packages: dict[str, str]) -> None:
@@ -134,9 +284,41 @@ def test_install_command(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Non
     assert listing.read_text(encoding="utf-8") == "lib==1.0\n"
 
 
+def test_install_accepts_requirements(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[list[str]] = []
+    monkeypatch.setattr(licenses.subprocess, "run", lambda command, check: calls.append(command))
+    requirements = [
+        "lib",
+        "  Lib.Name_two~=1.0",
+        "lib[extra]>=1.0",
+        "lib (>=1.0)",
+        "lib==1.0 ; python_version >= '3.12'",
+        "lib @ https://example.com/lib-1.0-py3-none-any.whl",
+    ]
+    licenses.install(requirements, [], tmp_path / "site", "3.14")
+    listing = Path(calls[0][calls[0].index("--requirement") + 1])
+    assert listing.read_text(encoding="utf-8").splitlines() == requirements
+
+
 @pytest.mark.parametrize(
     "requirement",
-    ["--index-url=https://pkgs.example.com", "lib\n--index-url https://pkgs.example.com"],
+    [
+        "--index-url=https://pkgs.example.com",
+        "lib\n--index-url https://pkgs.example.com",
+        "\ufeff--index-url https://pkgs.example.com",
+        " \ufeff-r other.txt",
+        "\ufefflib==1.0",
+        "lib==1.0\u2028--index-url https://pkgs.example.com",
+        "./vendor/lib",
+        "/srv/lib",
+        "~/lib",
+        "https://example.com/lib-1.0.tar.gz",
+        "file:lib",
+        "lib-1.0-py3-none-any.whl",
+        "lib.tar.gz",
+        "lib.ZIP",
+        "",
+    ],
 )
 def test_install_rejects_options_in_requirements(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, requirement: str
@@ -161,6 +343,22 @@ def test_main_license_file(tmp_path: Path, capsys: Capture) -> None:
     assert "No runtime dependency declared." in capsys.readouterr().out
 
     assert licenses.main(["--root", str(tmp_path), "--license", "LicenseRef-Custom"]) == 0
+
+
+def test_main_rejects_byte_order_mark_in_manifest(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: Capture
+) -> None:
+    calls: list[list[str]] = []
+    monkeypatch.setattr(licenses.subprocess, "run", lambda command, check: calls.append(command))
+    (tmp_path / "LICENSE").write_text(MIT_TEXT, encoding="utf-8")
+    manifest = tmp_path / "custom_components" / "demo" / "manifest.json"
+    manifest.parent.mkdir(parents=True)
+    requirements = ["\ufeff--index-url https://pkgs.example.com/simple", "lib==1.0"]
+    data = {"domain": "demo", "requirements": requirements}
+    manifest.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+    assert licenses.main(["--root", str(tmp_path)]) == 1
+    assert "Invalid manifest requirement" in capsys.readouterr().err
+    assert calls == []
 
 
 def test_main_dependencies(
