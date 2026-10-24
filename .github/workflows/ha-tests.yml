@@ -1,0 +1,147 @@
+name: Home Assistant tests
+
+# Run pytest with pytest-homeassistant-custom-component against the oldest
+# supported Home Assistant release (the "homeassistant" key of hacs.json) and
+# the latest one, and enforce a coverage threshold.
+#
+# The workflow chooses the versions of homeassistant and
+# pytest-homeassistant-custom-component, so the test requirements file must
+# not pin them.
+
+on:
+  workflow_call:
+    inputs:
+      homeassistant-minimum:
+        description: Oldest supported Home Assistant version. Defaults to the value in hacs.json.
+        type: string
+        default: ""
+      python-minimum:
+        description: Python version used with the oldest Home Assistant version.
+        type: string
+        default: "3.13"
+      python-latest:
+        description: Python version used with the latest Home Assistant version.
+        type: string
+        default: "3.14"
+      requirements:
+        description: Test requirements file, installed when it exists.
+        type: string
+        default: requirements_test.txt
+      coverage-source:
+        description: Package or directory measured for coverage.
+        type: string
+        default: custom_components
+      coverage-minimum:
+        description: Minimum total coverage, in percent.
+        type: number
+        default: 90
+
+permissions: {}
+
+jobs:
+  tests:
+    name: Tests (${{ matrix.name }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: minimum
+            python: ${{ inputs.python-minimum }}
+          - name: latest
+            python: ${{ inputs.python-latest }}
+    steps:
+      - name: Check out
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: ${{ matrix.python }}
+
+      - name: Install uv
+        uses: $/actions/setup-tools
+        with:
+          tools: uv
+
+      - name: Select Home Assistant version
+        id: select
+        env:
+          LEG: ${{ matrix.name }}
+          MINIMUM: ${{ inputs.homeassistant-minimum }}
+        run: |
+          if [[ "$LEG" == "latest" ]]; then
+            echo "spec=pytest-homeassistant-custom-component" >> "$GITHUB_OUTPUT"
+          else
+            if [[ -z "$MINIMUM" ]]; then
+              MINIMUM="$(jq -er '.homeassistant' hacs.json)" || {
+                echo "::error::Set homeassistant-minimum or the homeassistant key of hacs.json."
+                exit 1
+              }
+            fi
+            # Old releases do not pin their transitive dependencies, and newer
+            # ones break them. Resolve as of one week after the release, which
+            # matches what an install of that release had.
+            uploaded="$(curl -fsS "https://pypi.org/pypi/homeassistant/${MINIMUM}/json" \
+              | jq -er '.urls[0].upload_time_iso_8601')"
+            echo "spec=homeassistant==${MINIMUM}" >> "$GITHUB_OUTPUT"
+            echo "cutoff=$(date -u -d "${uploaded} + 7 days" +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
+          fi
+          echo "week=$(date -u +%G-%V)" >> "$GITHUB_OUTPUT"
+
+      - name: Cache uv downloads
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/uv
+          key: uv-${{ matrix.name }}-${{ matrix.python }}-${{ steps.select.outputs.week }}-${{ hashFiles(inputs.requirements, 'custom_components/*/manifest.json', 'hacs.json') }}
+          restore-keys: |
+            uv-${{ matrix.name }}-${{ matrix.python }}-
+
+      - name: Install dependencies
+        env:
+          SPEC: ${{ steps.select.outputs.spec }}
+          CUTOFF: ${{ steps.select.outputs.cutoff }}
+          REQUIREMENTS: ${{ inputs.requirements }}
+        run: |
+          runtime="${RUNNER_TEMP}/runtime.txt"
+          shopt -s nullglob
+          manifests=(custom_components/*/manifest.json)
+          if (( ${#manifests[@]} )); then
+            jq -r '.requirements[]?' "${manifests[@]}" > "$runtime"
+          else
+            : > "$runtime"
+          fi
+          args=("$SPEC" pytest-homeassistant-custom-component --requirement "$runtime")
+          if [[ -f "$REQUIREMENTS" ]]; then
+            args+=(--requirement "$REQUIREMENTS")
+          fi
+          if [[ -n "$CUTOFF" ]]; then
+            # The integration's own requirements are installed at their
+            # current versions, as Home Assistant does at runtime.
+            now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            args+=(--exclude-newer "$CUTOFF")
+            while read -r name; do
+              args+=(--exclude-newer-package "${name}=${now}")
+            done < <(sed -nE 's/^[[:space:]]*([A-Za-z0-9][A-Za-z0-9._-]*).*/\1/p' "$runtime")
+          fi
+          uv pip install --system "${args[@]}"
+          uv pip show --system homeassistant pytest-homeassistant-custom-component | grep -E '^(Name|Version):'
+
+      - name: Run tests
+        env:
+          COVERAGE_SOURCE: ${{ inputs.coverage-source }}
+          COVERAGE_MINIMUM: ${{ inputs.coverage-minimum }}
+        run: >-
+          python -m pytest
+          --cov="$COVERAGE_SOURCE"
+          --cov-report=term-missing:skip-covered
+          --cov-fail-under="$COVERAGE_MINIMUM"
+
+      - name: Prune uv cache
+        if: always()
+        run: uv cache prune --ci

@@ -1,0 +1,25 @@
+# Weekly updates, grouped into one pull request per ecosystem. The composite
+# actions under actions/ pin actions too, so they are scanned as well.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directories: ["/", "/actions/*"]
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: ci
+      include: scope
+    groups:
+      github-actions:
+        patterns: ["*"]
+
+  - package-ecosystem: pip
+    directory: /
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: chore
+      include: scope
+    groups:
+      python:
+        patterns: ["*"]

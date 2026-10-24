@@ -1,0 +1,40 @@
+name: Release
+description: >-
+  Publish a GitHub release tagged v<version> for a commit when the tag does
+  not exist yet, with the matching CHANGELOG.md section as notes.
+inputs:
+  sha:
+    description: Commit to release. It must be checked out.
+    required: true
+  version-file:
+    description: >-
+      File declaring the version (manifest.json, config.yaml, pyproject.toml or
+      a plain text file). Defaults to the only integration manifest.
+    default: ""
+  changelog:
+    description: Changelog file with one `## <version>` section per release.
+    default: CHANGELOG.md
+  token:
+    description: Token allowed to create releases.
+    default: ${{ github.token }}
+runs:
+  using: composite
+  steps:
+    - name: Read version
+      id: version
+      shell: bash
+      env:
+        VERSION_FILE: ${{ inputs.version-file }}
+        PYTHONPATH: ${{ github.action_path }}/../../src
+      run: python3 -P -m ci_checks.release version --file "$VERSION_FILE" >> "$GITHUB_OUTPUT"
+    - name: Publish release
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.token }}
+        GH_REPO: ${{ github.repository }}
+        SHA: ${{ inputs.sha }}
+        VERSION: ${{ steps.version.outputs.version }}
+        PRERELEASE: ${{ steps.version.outputs.prerelease }}
+        CHANGELOG: ${{ inputs.changelog }}
+        PYTHONPATH: ${{ github.action_path }}/../../src
+      run: bash "$GITHUB_ACTION_PATH/publish.sh"

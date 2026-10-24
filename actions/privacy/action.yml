@@ -1,0 +1,38 @@
+name: Privacy
+description: >-
+  Scan files, the whole commit history and the pull request text for secrets
+  and personal data. The denylist is read from the PRIVACY_DENYLIST
+  environment variable, which the calling step sets from a secret.
+inputs:
+  allowed-domains:
+    description: Extra domains allowed in URLs, separated by spaces or commas.
+    default: ""
+  exclude:
+    description: Globs of files skipped by the generic patterns (never by the denylist or gitleaks).
+    default: ""
+  require-denylist:
+    description: Fail when the denylist is empty. Pull requests from forks only warn.
+    default: "true"
+runs:
+  using: composite
+  steps:
+    - name: Install gitleaks
+      uses: $/actions/setup-tools
+      with:
+        tools: gitleaks
+    - name: Scan history for secrets
+      shell: bash
+      run: gitleaks git --no-banner --redact --exit-code 1 .
+    - name: Scan for personal data
+      if: ${{ !cancelled() }}
+      shell: bash
+      env:
+        ALLOWED_DOMAINS: ${{ inputs.allowed-domains }}
+        EXCLUDE: ${{ inputs.exclude }}
+        REQUIRE_DENYLIST: ${{ inputs.require-denylist }}
+        PYTHONPATH: ${{ github.action_path }}/../../src
+      run: >-
+        python3 -P -m ci_checks.privacy
+        --allowed-domains "$ALLOWED_DOMAINS"
+        --exclude "$EXCLUDE"
+        --require-denylist "$REQUIRE_DENYLIST"

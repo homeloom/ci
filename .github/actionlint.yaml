@@ -1,0 +1,6 @@
+# actionlint does not know the `$/` self repository syntax yet. It resolves
+# to this repository at the running commit and takes no `@ref`.
+paths:
+  .github/workflows/**/*.yml:
+    ignore:
+      - 'specifying action "\$/[^"]+" in invalid format because ref is missing'

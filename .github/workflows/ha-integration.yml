@@ -1,0 +1,38 @@
+name: Home Assistant integration
+
+# Validate an integration with hassfest, and with the HACS action once the
+# repository is public (HACS cannot read private repositories).
+
+on:
+  workflow_call:
+    inputs:
+      hacs-ignore:
+        description: HACS checks to skip, separated by spaces.
+        type: string
+        default: ""
+
+permissions: {}
+
+jobs:
+  validate:
+    name: Validate
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - name: Check out
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Hassfest
+        uses: home-assistant/actions/hassfest@cd6f3635a740c84d8a14f6121a90068b8ece6bf6 # master
+
+      - name: HACS
+        if: ${{ !cancelled() && github.event.repository.private == false }}
+        uses: hacs/action@d556e736723344f83838d08488c983a15381059a # 22.5.0
+        with:
+          category: integration
+          ignore: ${{ inputs.hacs-ignore }}
+          comment: "false"

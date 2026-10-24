@@ -1,0 +1,101 @@
+name: Hygiene
+
+# Checks that apply to every repository, grouped in one job to save runner
+# minutes: pull request title, secrets and personal data, language, licenses
+# and workflow syntax. Every step runs even when an earlier one fails, so a
+# single run reports every problem.
+
+on:
+  workflow_call:
+    inputs:
+      allowed-domains:
+        description: Extra domains allowed in URLs.
+        type: string
+        default: ""
+      privacy-exclude:
+        description: Globs of files skipped by the generic personal data patterns.
+        type: string
+        default: ""
+      require-denylist:
+        description: Fail when the PRIVACY_DENYLIST secret is empty.
+        type: boolean
+        default: true
+      english-exclude:
+        description: Globs of files skipped by the language check.
+        type: string
+        default: ""
+      license:
+        description: SPDX identifier the LICENSE file must match.
+        type: string
+        default: MIT
+      license-requirements:
+        description: Extra runtime requirements files whose licenses are checked.
+        type: string
+        default: ""
+      license-allowed:
+        description: SPDX identifiers that replace the default allowed list.
+        type: string
+        default: ""
+      license-exceptions:
+        description: Package names exempted after a manual license review.
+        type: string
+        default: ""
+    secrets:
+      PRIVACY_DENYLIST:
+        description: Terms that must never appear, one per line.
+        required: false
+
+permissions: {}
+
+jobs:
+  hygiene:
+    name: Hygiene
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - name: Check out
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Pull request title
+        if: github.event_name == 'pull_request'
+        uses: $/actions/pr-title
+
+      - name: Privacy
+        if: ${{ !cancelled() }}
+        uses: $/actions/privacy
+        env:
+          PRIVACY_DENYLIST: ${{ secrets.PRIVACY_DENYLIST }}
+        with:
+          allowed-domains: ${{ inputs.allowed-domains }}
+          exclude: ${{ inputs.privacy-exclude }}
+          require-denylist: ${{ inputs.require-denylist }}
+
+      - name: English
+        if: ${{ !cancelled() }}
+        uses: $/actions/english
+        with:
+          exclude: ${{ inputs.english-exclude }}
+
+      - name: Licenses
+        if: ${{ !cancelled() }}
+        uses: $/actions/licenses
+        with:
+          license: ${{ inputs.license }}
+          requirements: ${{ inputs.license-requirements }}
+          allowed: ${{ inputs.license-allowed }}
+          exceptions: ${{ inputs.license-exceptions }}
+
+      - name: Install actionlint
+        if: ${{ !cancelled() }}
+        uses: $/actions/setup-tools
+        with:
+          tools: actionlint
+
+      - name: Lint workflows
+        if: ${{ !cancelled() }}
+        run: actionlint -color

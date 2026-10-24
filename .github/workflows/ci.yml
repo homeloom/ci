@@ -1,0 +1,76 @@
+name: CI
+
+# CI of this repository. It calls the reusable workflows from the same
+# commit, so a change to a workflow is tested by the pull request that makes it.
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review, edited]
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  hygiene:
+    if: github.event.pull_request.draft != true
+    uses: ./.github/workflows/hygiene.yml
+    with:
+      allowed-domains: claude.ai claude.com
+      # Test data is synthetic and exercises the patterns on purpose.
+      privacy-exclude: tests/*
+      # The language check holds French word lists; its tests use French samples.
+      english-exclude: src/ci_checks/english.py tests/*
+    secrets:
+      PRIVACY_DENYLIST: ${{ secrets.PRIVACY_DENYLIST }}
+
+  lint:
+    if: github.event.pull_request.draft != true
+    uses: ./.github/workflows/python-lint.yml
+
+  tests:
+    name: Tests
+    if: github.event.pull_request.draft != true
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Check out
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # The checks run on the system Python of the runner, so test on it.
+      - name: Set up Python
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.12"
+
+      - name: Install uv
+        uses: $/actions/setup-tools
+        with:
+          tools: uv
+
+      - name: Install test dependencies
+        run: uv pip install --system --require-hashes --requirement requirements-dev.txt
+
+      - name: Run tests
+        run: python -m pytest
+
+  report:
+    name: Report
+    if: ${{ !cancelled() && github.event.pull_request.draft != true }}
+    needs: [hygiene, lint, tests]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 2
+    steps:
+      - name: Check results
+        env:
+          NEEDS: ${{ toJSON(needs) }}
+        run: |
+          jq -r 'to_entries[] | "\(.key): \(.value.result)"' <<< "$NEEDS"
+          jq -e 'all(.[]; .result == "success")' <<< "$NEEDS" > /dev/null

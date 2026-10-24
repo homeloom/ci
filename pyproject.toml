@@ -1,0 +1,52 @@
+[project]
+name = "homeloom-ci"
+version = "0.1.0"
+description = "Shared CI workflows and checks for Home Assistant repositories."
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.12"
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = [
+    "B",    # flake8-bugbear
+    "C4",   # flake8-comprehensions
+    "E",    # pycodestyle errors
+    "F",    # pyflakes
+    "I",    # isort
+    "N",    # pep8-naming
+    "PT",   # flake8-pytest-style
+    "PTH",  # flake8-use-pathlib
+    "RET",  # flake8-return
+    "RUF",  # ruff-specific rules
+    "S",    # flake8-bandit
+    "SIM",  # flake8-simplify
+    "UP",   # pyupgrade
+    "W",    # pycodestyle warnings
+]
+ignore = [
+    # The checks run fixed git and uv commands built from argument lists,
+    # never through a shell.
+    "S603",
+    "S607",
+    # Word lists read better as whitespace separated text blocks.
+    "SIM905",
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["S101"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
+addopts = [
+    "--strict-markers",
+    "--cov=ci_checks",
+    "--cov-branch",
+    "--cov-report=term-missing:skip-covered",
+    "--cov-fail-under=90",
+]

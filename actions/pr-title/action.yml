@@ -1,0 +1,19 @@
+name: Pull request title
+description: Check that the pull request title follows Conventional Commits.
+inputs:
+  types:
+    description: Allowed commit types, separated by spaces or commas.
+    default: build chore ci docs feat fix perf refactor revert style test
+  max-length:
+    description: Maximum title length.
+    default: "100"
+runs:
+  using: composite
+  steps:
+    - name: Check title
+      shell: bash
+      env:
+        TYPES: ${{ inputs.types }}
+        MAX_LENGTH: ${{ inputs.max-length }}
+        PYTHONPATH: ${{ github.action_path }}/../../src
+      run: python3 -P -m ci_checks.pr_title --types "$TYPES" --max-length "$MAX_LENGTH"

@@ -1,0 +1,28 @@
+name: Release
+
+# Publish a release tagged v<manifest version> when CI passes on main and the
+# tag does not exist yet. The notes come from the matching CHANGELOG.md section.
+
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+    branches: [main]
+
+permissions: {}
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    if: >-
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.event == 'push' &&
+      github.event.workflow_run.head_repository.full_name == github.repository
+    permissions:
+      contents: write
+    uses: homeloom/ci/.github/workflows/release.yml@REPLACE_WITH_RELEASE_SHA # vX.Y.Z
+    with:
+      sha: ${{ github.event.workflow_run.head_sha }}

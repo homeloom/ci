@@ -1,0 +1,53 @@
+name: Home Assistant app
+
+# Lint Home Assistant apps (formerly add-ons) and build their image for
+# amd64 without pushing it.
+
+on:
+  workflow_call:
+    inputs:
+      paths:
+        description: JSON array of app directories, for example ["my_app"].
+        type: string
+        required: true
+
+permissions: {}
+
+jobs:
+  app:
+    name: App (${{ matrix.path }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        path: ${{ fromJSON(inputs.paths) }}
+    steps:
+      - name: Check out
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Lint
+        uses: frenck/action-addon-linter@b9cfd1bc62ba60d2c4fc96317b5f7ada5923f4a7 # v2.21.1
+        with:
+          path: ${{ matrix.path }}
+
+      - name: Build image
+        if: ${{ !cancelled() }}
+        env:
+          APP_PATH: ${{ matrix.path }}
+        run: |
+          args=(--pull --platform linux/amd64 --build-arg BUILD_ARCH=amd64 --tag ci-app:test)
+          for file in build.yaml build.yml build.json; do
+            if [[ -f "${APP_PATH}/${file}" ]]; then
+              base="$(yq -r '.build_from.amd64 // ""' "${APP_PATH}/${file}")"
+              if [[ -n "$base" ]]; then
+                args+=(--build-arg "BUILD_FROM=${base}")
+              fi
+              break
+            fi
+          done
+          docker build "${args[@]}" "$APP_PATH"

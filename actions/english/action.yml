@@ -1,0 +1,17 @@
+name: English
+description: >-
+  Reject French text outside translation files, in pull request text and in
+  the messages of new commits.
+inputs:
+  exclude:
+    description: Globs of files to skip, separated by spaces or commas.
+    default: ""
+runs:
+  using: composite
+  steps:
+    - name: Check language
+      shell: bash
+      env:
+        EXCLUDE: ${{ inputs.exclude }}
+        PYTHONPATH: ${{ github.action_path }}/../../src
+      run: python3 -P -m ci_checks.english --exclude "$EXCLUDE"

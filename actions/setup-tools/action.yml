@@ -1,0 +1,14 @@
+name: Set up tools
+description: Install pinned command line tools after checking their SHA-256 digests.
+inputs:
+  tools:
+    description: Space separated tools to install (actionlint, gitleaks, ruff, uv).
+    required: true
+runs:
+  using: composite
+  steps:
+    - name: Install tools
+      shell: bash
+      env:
+        TOOLS: ${{ inputs.tools }}
+      run: bash "$GITHUB_ACTION_PATH/install.sh"
