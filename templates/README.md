@@ -27,3 +27,7 @@ After copying the files:
 3. Give the repository access to every organization secret whose name
    starts with `PRIVACY_DENYLIST`, both as Actions secrets and as Dependabot
    secrets. The CI workflow passes them with `secrets: inherit`.
+4. Once the first pull request is merged, run the CI workflow by hand
+   (Actions, CI, Run workflow). A manual run checks every commit of the
+   history as new; do it before the first release and before making the
+   repository public.
