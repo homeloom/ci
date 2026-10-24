@@ -72,6 +72,39 @@ jobs:
       - name: Run tests
         run: python -m pytest
 
+      # End to end: a term from a denylist secret is caught in a scratch
+      # repository, and the report shows where it is, never the term.
+      - name: Check that a planted term is caught
+        if: ${{ !cancelled() }}
+        env:
+          CI_SECRETS: '{"PRIVACY_DENYLIST_PLANTED": "Zorblequix"}'
+          PYTHONPATH: ${{ github.workspace }}/src
+        run: |
+          scratch="${RUNNER_TEMP}/planted"
+          log="${RUNNER_TEMP}/planted.log"
+          git init --quiet --initial-branch=main "$scratch"
+          printf '# Notes\n\nAsk zorblequix.\n' > "$scratch/notes.md"
+          git -C "$scratch" add notes.md
+          git -C "$scratch" -c user.name=ci -c user.email=1+ci@users.noreply.github.com \
+            -c commit.gpgsign=false commit --quiet --message "docs: add notes"
+          echo '{}' > "${RUNNER_TEMP}/event.json"
+          status=0
+          CI_EVENT_PATH="${RUNNER_TEMP}/event.json" \
+            python3 -P -m ci_checks.privacy --root "$scratch" > "$log" || status=$?
+          grep -v '^::add-mask::' "$log" | sed 's/^::error /error /'
+          if [[ "$status" -ne 1 ]]; then
+            echo "::error::The check exited with ${status} instead of 1."
+            exit 1
+          fi
+          if ! grep -qx '::error file=notes.md,line=3::notes.md:3: denylisted term.' "$log"; then
+            echo "::error::The planted term was not reported at notes.md:3."
+            exit 1
+          fi
+          if grep -v '^::add-mask::' "$log" | grep -qi 'zorblequix'; then
+            echo "::error::The report printed the planted term."
+            exit 1
+          fi
+
       - name: Install actionlint
         if: ${{ !cancelled() }}
         uses: $/actions/setup-tools
