@@ -10,6 +10,7 @@ import pytest
 
 from ci_checks import english
 from ci_checks._common import Reporter
+from ci_checks.denylist import Denylist
 from helpers import DEPENDABOT, EventWriter, Repo, pr_event
 
 Capture = pytest.CaptureFixture[str]
@@ -196,6 +197,18 @@ def test_check_files(repo: Repo, capsys: Capture) -> None:
     assert "file=a.py,line=2::Line looks French (or another language" in capsys.readouterr().out
 
 
+def test_check_files_redacts_denylisted_paths(repo: Repo, capsys: Capture) -> None:
+    repo.write("docs/Bluefinch/notes.md", "# Notes\n\nRécupère la valeur du capteur.\n")
+    reporter = Reporter("English")
+    english.check_files(
+        repo.root, ["docs/Bluefinch/notes.md"], reporter, denylist=Denylist("Bluefinch")
+    )
+    out = capsys.readouterr().out
+    assert reporter.count == 1
+    assert "::error::docs/[redacted]/notes.md:3: Line looks French" in out
+    assert "bluefinch" not in out.lower()
+
+
 def test_english_ui_text_needs_no_pragma(repo: Repo) -> None:
     # JSON cannot hold a ci-allow comment, so English UI text must pass as it is.
     strings = """{
@@ -241,6 +254,15 @@ def test_check_messages(repo: Repo, capsys: Capture) -> None:
     assert "message looks French" in out
     assert "Pull request title looks French." in out
     assert "Pull request body looks French." in out
+
+
+def test_pragma_in_messages_and_body(repo: Repo) -> None:
+    base = repo.commit("chore: initial")
+    head = repo.commit("docs: quote the motto\n\nLa vie est belle  ci-allow: french")
+    body = "Quotes a motto:\n\n> La vie est belle <!-- ci-allow: french -->"
+    reporter = Reporter("English")
+    english.check_messages(repo.root, pr_event(base, head, body=body), reporter)
+    assert reporter.count == 0
 
 
 def test_trailers_naming_people_are_skipped(repo: Repo, capsys: Capture) -> None:
@@ -310,6 +332,22 @@ def test_main(repo: Repo, event: EventWriter, capsys: Capture) -> None:
     assert english.main([*root, "--exclude", "vendor/*", "--allowed-words", allowed]) == 0
     assert english.main(root) == 1
     assert "English: 2 problem(s) found." in capsys.readouterr().out
+
+
+def test_main_reads_the_denylist_secrets(
+    repo: Repo, event: EventWriter, monkeypatch: pytest.MonkeyPatch, capsys: Capture
+) -> None:
+    repo.write("Bluefinch.md", "Récupère la valeur du capteur.\n")
+    repo.commit("docs: add notes")
+    event({})
+    monkeypatch.setenv("CI_SECRETS", '{"PRIVACY_DENYLIST_X": "Bluefinch"}')
+    assert english.main(["--root", str(repo.root)]) == 1
+    out = capsys.readouterr().out
+    assert "[redacted]:1: Line looks French" in out
+    assert "bluefinch" not in out.lower()
+    monkeypatch.setenv("CI_SECRETS", "[]")
+    assert english.main(["--root", str(repo.root)]) == 1
+    assert "CI_SECRETS does not hold a JSON object." in capsys.readouterr().err
 
 
 def test_main_rejects_shallow_clones(

@@ -117,6 +117,7 @@ jobs:
         if: ${{ !cancelled() }}
         uses: $/actions/english
         with:
+          denylist-secrets: ${{ toJSON(secrets) }}
           exclude: ${{ inputs.english-exclude }}
           allowed-words: ${{ inputs.english-allowed-words }}
 

@@ -17,13 +17,15 @@ names, hyphenated or not.
 
 The same rule applies to the pull request title and body and to the messages
 of the commits introduced by the event, without the trailers that name
-people, such as Co-authored-by. Text written by dependency update bots is
-skipped.
+people, such as Co-authored-by; their lines can opt out with the same
+comment. Text written by dependency update bots is skipped. File paths that
+hold a denylisted term (see ci_checks.denylist) are redacted in the report.
 """
 
 from __future__ import annotations
 
 import argparse
+import os
 import re
 import sys
 import unicodedata
@@ -37,6 +39,7 @@ from ci_checks._common import (
     allowed_by_pragma,
     commits,
     dependency_bot_commits,
+    display_path,
     fail,
     iter_lines,
     load_event,
@@ -47,6 +50,7 @@ from ci_checks._common import (
     split_list,
     tracked_files,
 )
+from ci_checks.denylist import Denylist, denylist_sources, location
 
 CATEGORY = "french"
 SIGNAL_THRESHOLD = 3
@@ -363,19 +367,32 @@ def _prose_lines(message: str) -> list[str]:
 
 
 def check_files(
-    root: Path, paths: Iterable[str], reporter: Reporter, allowed: frozenset[str] = frozenset()
+    root: Path,
+    paths: Iterable[str],
+    reporter: Reporter,
+    allowed: frozenset[str] = frozenset(),
+    denylist: Denylist | None = None,
 ) -> None:
     """Report lines of non-translation files that look French."""
-    selected = [path for path in paths if not is_translation(path)]
+    denylist = denylist or Denylist("")
+    selected = [path for path in paths if not is_translation(display_path(path))]
     for path, number, line in iter_lines(root, selected):
         if looks_french(line, allowed) and not allowed_by_pragma(line, CATEGORY):
+            shown, annotated = location(denylist, display_path(path))
             reporter.error(
-                "Line looks French (or another language than English). Write it in "
+                ("" if annotated else f"{shown}:{number}: ")
+                + "Line looks French (or another language than English). Write it in "
                 "English, move it to a translation file, or add `ci-allow: french` "
                 "if it is English.",
-                path,
+                annotated,
                 number,
             )
+
+
+def _french_lines(lines: Iterable[str], allowed: frozenset[str]) -> bool:
+    return any(
+        looks_french(line, allowed) and not allowed_by_pragma(line, CATEGORY) for line in lines
+    )
 
 
 def check_messages(
@@ -391,15 +408,14 @@ def check_messages(
     for commit in new:
         if commit.sha in exempt:
             continue
-        if any(looks_french(line, allowed) for line in _prose_lines(commit.message)):
+        if _french_lines(_prose_lines(commit.message), allowed):
             reporter.error(f"Commit {commit.short}: message looks French.")
     pr = pull_request(event)
     if pr is None:
         return
     if looks_french(pr.title, allowed):
         reporter.error("Pull request title looks French.")
-    body = pr.body.splitlines()
-    if not pr.is_dependency_bot and any(looks_french(line, allowed) for line in body):
+    if not pr.is_dependency_bot and _french_lines(pr.body.splitlines(), allowed):
         reporter.error("Pull request body looks French.")
 
 
@@ -415,13 +431,16 @@ def main(argv: list[str] | None = None) -> int:
 
     reporter = Reporter("English")
     try:
+        denylist = Denylist("\n".join(denylist_sources(os.environ)))
         require_full_history(args.root)
     except CheckError as err:
         return fail(str(err))
     exclude = split_list(args.exclude)
-    paths = [path for path in tracked_files(args.root) if not matches_any(path, exclude)]
+    paths = [
+        path for path in tracked_files(args.root) if not matches_any(display_path(path), exclude)
+    ]
     allowed = frozenset(normalize(word).lower() for word in split_list(args.allowed_words))
-    check_files(args.root, paths, reporter, allowed)
+    check_files(args.root, paths, reporter, allowed, denylist)
     check_messages(args.root, load_event(), reporter, allowed)
     return reporter.finish()
 

@@ -28,14 +28,6 @@ APACHE_LICENSE = """
 Capture = pytest.CaptureFixture[str]
 
 
-@pytest.fixture(autouse=True)
-def no_denylist_in_environment(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Keep denylists of the environment that runs the tests out of them."""
-    for name in list(os.environ):
-        if name.upper().startswith("PRIVACY_DENYLIST") or name == "CI_SECRETS":
-            monkeypatch.delenv(name)
-
-
 @pytest.mark.parametrize(
     ("text", "category"),
     [

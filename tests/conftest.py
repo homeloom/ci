@@ -3,12 +3,21 @@
 from __future__ import annotations
 
 import json
+import os
 from collections.abc import Callable
 from pathlib import Path
 
 import pytest
 
 from helpers import Repo
+
+
+@pytest.fixture(autouse=True)
+def no_denylist_in_environment(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep the denylists of the environment that runs the tests out of them."""
+    for name in list(os.environ):
+        if name.upper().startswith("PRIVACY_DENYLIST") or name == "CI_SECRETS":
+            monkeypatch.delenv(name)
 
 
 @pytest.fixture
