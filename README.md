@@ -197,7 +197,7 @@ Limits:
 | `python-latest` | `3.14` | Python used with the latest version. |
 | `requirements` | `requirements_test.txt` | Test requirements, installed when the file exists. |
 | `coverage-source` | `custom_components` | What coverage measures. |
-| `coverage-minimum` | `90` | Minimum total coverage in percent. |
+| `coverage-minimum` | `95` | Minimum total coverage in percent. Lowering it needs a written justification in the pull request. |
 
 The workflow picks the versions of `homeassistant` and
 `pytest-homeassistant-custom-component`, so the test requirements must not

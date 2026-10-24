@@ -38,7 +38,10 @@ secret.
 
 ## Tests and quality
 
-- New code comes with tests. Total coverage must stay at or above 90 %.
+- New code comes with tests that check real behavior. Total coverage must
+  stay at or above 95 %. Code is only left out with
+  `# pragma: no cover - <reason>` on the line, and lowering the threshold
+  needs a written justification in the pull request.
 - Linting and formatting use Ruff with the configuration of the repository.
 - Do not add a dependency without checking its license and maintenance
   status. CI rejects licenses outside the allowed list.

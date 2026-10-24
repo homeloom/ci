@@ -13,7 +13,7 @@
 ## Checklist
 
 - [ ] The title follows Conventional Commits (`type(scope): subject`).
-- [ ] Tests cover the change, and total coverage stays at or above 90 %.
+- [ ] Tests cover the change, and total coverage stays at or above 95 %.
 - [ ] `CHANGELOG.md` is updated for user facing changes.
 - [ ] Documentation is updated.
 - [ ] Everything is in English, and nothing personal or secret is included.
