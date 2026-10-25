@@ -12,8 +12,10 @@ YAML files, do not apply to them.
 
 Findings name the commit, file, rule and line, never the secret. A known
 false positive that is already in the history of the base branch can be
-ignored by listing its fingerprint; nothing in the repository content can
-hide a finding.
+ignored by listing its fingerprint. In the repository content, only
+gitleaks' own gitleaks:allow comment hides a line, and the privacy check
+warns about it wherever it can read it: added lines of text files and added
+binary files, but not compressed content or files over MAX_SCAN_BYTES.
 """
 
 from __future__ import annotations

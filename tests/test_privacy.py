@@ -504,7 +504,7 @@ def test_check_changes_finds_content_removed_later(repo: Repo, capsys: Capture) 
     )
     repo.write("fixtures/data.txt", "10.0.0.5\n")
     repo.write("LICENSE", "https://nas.zorble.internal\n")
-    repo.write("image.bin", b"\0 Artist: Bluefinch \0")
+    repo.write("image.bin", b"\0 Artist: Bluefinch \0 gitleaks:allow \0")
     repo.write("docs/bluefinch.md", "ok\n")
     repo.write("docs/wrapped.md", "We meet at rue des\nLilas.\n")
     repo.write("photo.jpg", jpeg(exif_segment(tiff([], gps_position()))))
@@ -518,11 +518,13 @@ def test_check_changes_finds_content_removed_later(repo: Repo, capsys: Capture) 
     out = capsys.readouterr().out
     short = leak[:12]
     assert check.reporter.count == 6
+    assert out.count("gitleaks:allow") == 2
     assert f"Commit {short}: notes.md:2: an added line may contain personal data" in out
     assert f"Commit {short}: notes.md:3: an added line has a denylisted term." in out
     assert f"Commit {short}: notes.md:5: gitleaks:allow hides the line" in out
     assert out.count(f"Commit {short}: a file path contains a denylisted term.") == 1
     assert f"Commit {short}: image.bin: binary content contains a denylisted term." in out
+    assert f"Commit {short}: image.bin: gitleaks:allow in binary content hides lines" in out
     assert f"Commit {short}: docs/wrapped.md:1: an added line has a denylisted term." in out
     assert f"Commit {short}: photo.jpg: the file metadata may contain personal data" in out
     assert "notes.md:1:" not in out

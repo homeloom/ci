@@ -820,6 +820,11 @@ class PrivacyCheck:
             text = _text(data)
             if text is None:
                 self._check_binary(where, None, data, generic)
+                if b"gitleaks:allow" in data:
+                    self.reporter.warning(
+                        f"{where}: gitleaks:allow in binary content hides lines from the "
+                        "secret scan. Reviewers must confirm that the file holds no secret."
+                    )
                 continue
             self._check_added(where, change, split_lines(text), generic)
 
