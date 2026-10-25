@@ -283,6 +283,31 @@ def test_glued_terms_after_complete_escapes(text: str) -> None:
     assert Denylist("Zorblequix").matches(text)
 
 
+@pytest.mark.parametrize(
+    "text",
+    [
+        # Entities that do not decode are text.
+        "Smith&Sons;Zorblequix",
+        "R&D;Zorblequix;2024",
+        # Partial escapes that the next letters do not complete.
+        "\\x1Zorblequix",
+        "%2Zorblequix",
+        "\\u12Zorblequix",
+    ],
+)
+def test_glued_terms_after_text_that_looks_like_an_escape(text: str) -> None:
+    assert Denylist("Zorblequix").matches(text)
+
+
+def test_terms_next_to_an_escape_are_still_found() -> None:
+    # The longest match ends before an escape, so the shorter terms at the
+    # same place are tried.
+    denylist = Denylist("Bluefinch\nBluefinch Quillmore")
+    assert denylist.matches("Bluefinch Quillmore&amp;amp;eacute;")
+    denylist = Denylist("Zorblequix 5G\nZorblequix5G Guest")
+    assert denylist.spans("ssid = Zorblequix5G Guest&amp;amp;eacute;") == [(1, 1)]
+
+
 def test_numbers_in_binary_content() -> None:
     assert NUMBERS.matches_binary(b"\x00Code 12.3.0 here\x00")
     assert not NUMBERS.matches_binary(b"\x00DateTime\x002026:12:30 12:30:00\x00")

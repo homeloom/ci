@@ -52,7 +52,7 @@ def test_tiff_text_fields_and_position(order: str) -> None:
 def test_gps_directory_without_a_position() -> None:
     zero = [rational_field(2, "<", (0, 1), (0, 1), (0, 1)), ascii_field(1, "N")]
     assert not read_metadata(tiff([ascii_field(ARTIST, "x")], zero)).location
-    assert read_metadata(tiff([], gps_position(degrees=0))).location
+    assert read_metadata(tiff([], gps_position(minutes=1, seconds=0))).location
 
 
 @pytest.mark.parametrize(

@@ -48,11 +48,12 @@ def tiff(fields: Sequence[Field] = (), gps: Sequence[Field] = (), order: str = "
     return header + _ifd(main, 8, order) + _ifd(gps, gps_offset, order)
 
 
-def gps_position(order: str = "<", degrees: int = 0) -> list[Field]:
-    """Return GPS fields one second north and east of 0, 0, in the open sea."""
+def gps_position(order: str = "<", minutes: int = 0, seconds: int = 1) -> list[Field]:
+    """Return GPS fields north and east of 0, 0, one second away by default, in the open sea."""
+    angle = ((0, 1), (minutes, 1), (seconds * 100, 100))
     return [
-        rational_field(GPS_LATITUDE, order, (degrees, 1), (0, 1), (100, 100)),
-        rational_field(GPS_LONGITUDE, order, (0, 1), (0, 1), (100, 100)),
+        rational_field(GPS_LATITUDE, order, *angle),
+        rational_field(GPS_LONGITUDE, order, *angle),
     ]
 
 

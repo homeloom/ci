@@ -262,6 +262,7 @@ def test_minimum_leg_installs_the_bounded_plugin(repo: Repo, tmp_path: Path) -> 
     )
     uv.chmod(0o755)
     repo.write("custom_components/zorble/manifest.json", '{"requirements": ["zorblelib==1.0"]}')
+    repo.write("requirements_test.txt", "pytest-zorble==2.0\n")
     (tmp_path / "runner").mkdir()
     result = run_step(
         repo,
@@ -272,17 +273,21 @@ def test_minimum_leg_installs_the_bounded_plugin(repo: Repo, tmp_path: Path) -> 
             "SPEC": "homeassistant==2026.3.0",
             "CUTOFF": "2026-03-11T12:00:00Z",
             "REQUIREMENTS": "requirements_test.txt",
-            "PLUGIN": workflow_env("PLUGIN"),
+            "PLUGIN": "zorbleplugin>=9",
         },
     )
     assert result.returncode == 0, result.stdout + result.stderr
     install = calls.read_text(encoding="utf-8").splitlines()[0].split()
-    assert install[:4] == [
+    assert install[:5] == [
         "pip",
         "install",
         "--system",
         "homeassistant==2026.3.0",
+        "zorbleplugin>=9",
     ]
-    assert "pytest-homeassistant-custom-component>=0.13" in install
-    assert "--exclude-newer" in install
-    assert "zorblelib=" in " ".join(install)
+    assert install[install.index("--requirement", 6) + 1] == "requirements_test.txt"
+    assert install[install.index("--exclude-newer") + 1] == "2026-03-11T12:00:00Z"
+    # The integration's own requirements are resolved as of now.
+    name, cutoff = install[install.index("--exclude-newer-package") + 1].split("=")
+    assert name == "zorblelib"
+    assert cutoff > "2026-03-11T12:00:00Z"

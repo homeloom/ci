@@ -2,10 +2,11 @@
 
 Matching ignores case, accents and invisible characters, respects word
 boundaries, and lets the words of a term be separated by any punctuation,
-underscores or line breaks. Numbers are stricter, so that dates, times and
-versions do not spell terms made of numbers. Text that writes characters as
-escapes (\\u, \\x and \\n escapes, percent-encoding or HTML entities) is
-also matched as it reads once decoded.
+underscores or line breaks. Numbers are stricter, so that a term made of
+numbers does not match dates, times, versions or lists written in another
+shape. Text that writes characters as escapes (\\u, \\x and \\n
+escapes, percent-encoding or HTML entities) is also matched as it reads
+once decoded.
 """
 
 from __future__ import annotations
@@ -59,12 +60,11 @@ _ESCAPES = re.compile(
 )
 # An escape right before or after a word in the text as written: "Marc\\u00e8le"
 # is one word, not the name "Marc", so such words are only matched decoded.
-# Before a word, an escape may also end with the first letter of the word, as
-# in "%2Bluefinch", which reads "+luefinch".
+# Before a word, an escape may also end with the first letters of the word,
+# as in "%2Bluefinch", which reads "+luefinch".
 _ESCAPE_AFTER = re.compile(r"\\u[0-9a-f]{4}|\\x[0-9a-f]{2}|%[0-9a-f]{2}|&#?\w+;")
-_ESCAPE_BEFORE = re.compile(
-    rf"(?:{_ESCAPE_AFTER.pattern}|\\u[0-9a-f]{{1,8}}|\\x[0-9a-f]|%[0-9a-f])\Z"
-)
+_ESCAPE_BEFORE = re.compile(rf"(?:{_ESCAPE_AFTER.pattern}|\\u[0-9a-f]{{8}})\Z")
+_PARTIAL_ESCAPE_BEFORE = re.compile(r"(?:\\u(?P<unicode>[0-9a-f]{1,7})|\\x[0-9a-f]|%[0-9a-f])\Z")
 # A lower case letter followed by a capital, as in "getName".
 _CAMEL = re.compile(r"(?<=[a-z\xdf-\xf6\xf8-\xff])(?=[A-Z\xc0-\xd6\xd8-\xde])")
 # What may separate two words of a term, besides the separator the term
@@ -259,6 +259,12 @@ class Denylist:
                 letters[_term_pattern(words, separators, glued)] = (size, words[0][0])
                 self.longest_term = max(self.longest_term, len(words))
         self._pattern = _alternation((p, size, first) for p, (size, first) in letters.items())
+        # Each term on its own, longest first, for the places where the
+        # longest term found touches an escape.
+        self._singles = [
+            (re.compile(p), size >= MIN_BINARY_TERM)
+            for p, (size, _) in sorted(letters.items(), key=lambda item: item[1][0], reverse=True)
+        ]
         # Random bytes spell short words by chance, so in binary content
         # shorter terms only count inside phrases (see matches_binary).
         self._long = _alternation(
@@ -307,14 +313,40 @@ class Denylist:
         for source, guarded in ((text, decoded is not None), (decoded, True)):
             if source is None:
                 continue
-            views = [(self._pattern, normalize(source))]
+            views = [(self._pattern, False, normalize(source))]
             if self._long and _CAMEL.search(source):
-                views.append((self._long, normalize(_CAMEL.sub(" ", source))))
-            for pattern, folded in views:
+                views.append((self._long, True, normalize(_CAMEL.sub(" ", source))))
+            for pattern, long_only, folded in views:
                 view += 1
-                for match in pattern.finditer(folded):
-                    if not (guarded and _next_to_escape(folded, match)):
-                        yield view, folded, match
+                singles = [single for single, long in self._singles if long or not long_only]
+                for match in self._search(pattern, singles, folded, guarded):
+                    yield view, folded, match
+
+    @staticmethod
+    def _search(
+        pattern: re.Pattern[str], singles: list[re.Pattern[str]], folded: str, guarded: bool
+    ) -> Iterator[re.Match[str]]:
+        """Yield the terms of a text, skipping those next to an escape.
+
+        Only the longest term is found at each place. When it touches an
+        escape, the other terms are tried at the same place, and the search
+        goes on right after its start, so that terms inside it are found.
+        """
+        position = 0
+        while match := pattern.search(folded, position):
+            if guarded and _next_to_escape(folded, match):
+                found = None
+                for single in singles:
+                    other = single.match(folded, match.start())
+                    if other and not _next_to_escape(folded, other):
+                        found = other
+                        break
+                if found is None:
+                    position = match.start() + 1
+                    continue
+                match = found
+            yield match
+            position = max(match.end(), match.start() + 1)
 
     def matches_binary(self, data: bytes) -> bool:
         """Return whether the readable strings of binary content contain a term.
@@ -385,8 +417,21 @@ class Denylist:
 
 
 def _next_to_escape(folded: str, match: re.Match[str]) -> bool:
+    """Return whether an escape that decodes touches a match.
+
+    An escape cut short before the match counts when the first letters of
+    the match are the hexadecimal digits it is missing.
+    """
     before = folded[max(0, match.start() - 40) : match.start()]
-    return bool(_ESCAPE_BEFORE.search(before) or _ESCAPE_AFTER.match(folded, match.end()))
+    for escape in (_ESCAPE_BEFORE.search(before), _ESCAPE_AFTER.match(folded, match.end())):
+        if escape and (escape[0][0] != "&" or html.unescape(escape[0]) != escape[0]):
+            return True
+    partial = _PARTIAL_ESCAPE_BEFORE.search(before)
+    if partial is None:
+        return False
+    digits = len(partial["unicode"] or "")
+    missing = 1 if partial["unicode"] is None else (4 if digits < 4 else 8) - digits
+    return set(folded[match.start() : match.start() + missing]) <= _HEX_DIGITS
 
 
 def _words(text: str) -> list[str]:

@@ -82,6 +82,7 @@ def fiction_detected(monkeypatch: pytest.MonkeyPatch) -> None:
         ("broker mqtt://broker.family.internal:1883", "url"),
         ("idn https://maison-zorblé.internal", "url"),
         ("footnote https://nas.zorble.internal\N{SUPERSCRIPT ONE}", "url"),
+        ("see https://nas.example.net/api", "url"),
         ("cd /home/alice/projects", "home-path"),
         ("open /Users/bob/Library", "home-path"),
         (r"C:\Users\carol\Desktop", "home-path"),
@@ -134,9 +135,12 @@ def test_generic_findings_detect(text: str, category: str) -> None:
         ("call +1-202-555-0243", "phone"),
         ("mac 00:00:5e:00:54:9d", "mac"),
         ("mac 00:00:5e:ef:10:9d", "mac"),
+        ("bssid=00005eef109d", "mac"),
+        ("cisco 0000.5eef.109d", "mac"),
         ("eui 00:00:5e:ef:11:a3:f4:c7", "device-id"),
         ("eui 00:00:5e:00:53:9d:a3:f4", "device-id"),
         ('"latitude": 1.23456', "coordinates"),
+        ('"latitude": 0.00123', "coordinates"),
         ("see https://nas.zorble.internal/api", "url"),
     ],
 )
@@ -177,8 +181,11 @@ def test_generic_findings_detect_next_to_reserved_ranges(text: str, category: st
         "devcontainer /home/vscode/.cache and ~/home/x and ./home/x",
         "media /media/recordings/cam.mp4 and /config/www and /Volumes/Data/x",
         "placeholder aa:bb:cc:dd:ee:ff and 00:00:5e:00:53:01",
-        "documentation 00005e00539d and eui 00:00:5e:ef:10:a3:f4:c7 and 0x00005eef10a3f4c7",
+        "bssid=00005e00539d and cisco 0000.5e00.539d and eui 00:00:5e:ef:10:a3:f4:c7",
+        "ieee 0x00005eef10a3f4c7, MAC 00:00:5E:00:53:9D and EUI 00:00:5E:EF:10:A3:F4:C7",
         "fiction mobile 06 39 98 27 58 and +44 20 7946 0738",
+        "fiction range edges +1-202-555-0100 and +1-202-555-0199",
+        "reserved https://nas.example.net/x and https://a.invalid/x",
         "sequential 3e:22:fb:12:34:56 and 02:11:22:33:44:55 and de:ad:be:ef:ca:fe",
         "frame 01:03:00:0a:00:02 and mask ff:ff:ff:ff:ff:00",
         "sha a6c1381a2b3c and commit 1234567890ab",
@@ -194,6 +201,19 @@ def test_generic_findings_detect_next_to_reserved_ranges(text: str, category: st
 )
 def test_generic_findings_ignore(text: str) -> None:
     assert privacy.generic_findings(text, ALLOWED) == []
+
+
+@pytest.mark.parametrize("prefix", privacy.FICTION_PHONE_PREFIXES)
+def test_each_fiction_phone_range_is_exempt(monkeypatch: pytest.MonkeyPatch, prefix: str) -> None:
+    # A number of the range, as long as the numbers of its country.
+    digits = (prefix + "41279358")[: 12 if prefix.startswith("44") else 11]
+    text = f"call +{digits[:2]} {digits[2:]}"
+    assert privacy.generic_findings(text, ALLOWED) == []
+    others = tuple(
+        other for other in privacy.FICTION_PHONE_PREFIXES if not prefix.startswith(other)
+    )
+    monkeypatch.setattr(privacy, "FICTION_PHONE_PREFIXES", others)
+    assert "phone" in privacy.generic_findings(text, ALLOWED)
 
 
 def test_extra_allowed_domain() -> None:

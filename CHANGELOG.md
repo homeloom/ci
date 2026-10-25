@@ -33,8 +33,9 @@ All notable changes to this project are documented here. The format follows
   0.13), and the job stops with a clear error when that version needs
   another Python than `python-minimum`.
 - Denylist matching that ignores case, accents and separators between the
-  words of a term, with stricter rules for numbers, so that dates, times and
-  versions never match a term made of numbers.
+  words of a term, with stricter rules for numbers, so that a term made of
+  numbers does not match dates, times, versions or lists written in another
+  shape.
 - Composite actions for each check, and a tool installer that verifies
   SHA-256 digests.
 - Templates for new repositories: license, security policy, contribution
