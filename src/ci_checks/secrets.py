@@ -4,9 +4,11 @@ gitleaks reads the diff of every commit in the history of the scanned
 commit, with the rules of the action's own configuration. It runs from an
 empty directory on the git directory, so a .gitleaks.toml or .gitleaksignore
 in the repository has no effect. Commit messages, the pull request title and
-body, and the files of the history that gitleaks cannot read in a diff
-(UTF-16 or UTF-32 text, paths ending with a backslash) are written to a
-temporary directory and scanned there with the same rules.
+body, and the lines that commits add to the files gitleaks cannot read in a
+diff (UTF-16 or UTF-32 text, paths ending with a backslash) are written to a
+temporary directory and scanned there with the same rules. They are written
+under generated names, so the few rules limited to some file names, such as
+YAML files, do not apply to them.
 
 Findings name the commit, file, rule and line, never the secret. A known
 false positive that is already in the history of the base branch can be
@@ -18,6 +20,7 @@ from __future__ import annotations
 
 import argparse
 import codecs
+import difflib
 import json
 import os
 import re
@@ -29,11 +32,13 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
 from ci_checks._common import (
+    EMPTY_SHA,
     MAX_SCAN_BYTES,
     CheckError,
     Commit,
     PullRequest,
     Reporter,
+    blob_contents,
     commits,
     decode_text,
     fail,
@@ -53,10 +58,15 @@ from ci_checks.privacy import Denylist
 LOG_OPTIONS = "--text --no-textconv --no-ext-diff --diff-merges=first-parent"
 _WIDE_BOMS = (codecs.BOM_UTF32_LE, codecs.BOM_UTF32_BE, codecs.BOM_UTF16_LE, codecs.BOM_UTF16_BE)
 _REGULAR_FILE = frozenset({"100644", "100755"})
-_RECORD = "\x1e"
+_BLOB_CHUNK = 256
+# gitleaks skips a line that carries this marker. The privacy check warns
+# about it on the lines added to files that git can diff; nothing would
+# question it in the texts of the directory scan, so it is removed from them.
+_ALLOW_MARKER = "gitleaks:allow"
 # gitleaks exits with 0 when git fails, and only says so in its log.
 _LOG_ERROR = re.compile(r"^\S+ (?:ERR|FTL) ")
 _COMMITS_SCANNED = re.compile(r" INF (\d+) commits scanned")
+_BYTES_SCANNED = re.compile(r" INF scanned ~(\d+) bytes")
 _FINGERPRINT = re.compile(r"([0-9a-f]{40}):(.*):([\w.-]+):(\d+)")
 
 
@@ -153,86 +163,87 @@ def scan_history(gitleaks: Gitleaks, root: Path, tip: str) -> list[Finding]:
     ]
 
 
-def history_files(root: Path, tip: str) -> list[tuple[str, str, str]]:
-    """Return (commit, path, blob) for each file content written in the history.
+def history_changes(root: Path, tip: str) -> list[tuple[str, str, str, str]]:
+    """Return (commit, path, old blob, new blob) for each file written in the history.
 
-    Each content comes with the first commit that wrote it at that path: a
-    commit comes after its parents. A merge counts with what differs from its
-    first parent, as in the gitleaks scan.
+    As in the gitleaks scan, a merge is compared with its first parent and a
+    renamed file with its old version. The old blob of a new file is
+    EMPTY_SHA.
     """
     output = git(
         "log",
         "-z",
-        "--reverse",
-        "--topo-order",
         "--raw",
         "--no-abbrev",
-        "--no-renames",
+        "--find-renames",
         "--diff-merges=first-parent",
-        f"--format={_RECORD}%H",
+        "--format=%H",
         tip,
         "--",
         cwd=root,
     )
     result = []
-    seen = set()
     sha = ""
     tokens = iter(output.split("\0"))
     for token in tokens:
         token = token.lstrip("\n")
-        if token.startswith(_RECORD):
-            sha = token[1:]
-        elif token.startswith(":"):
-            # ":<old mode> <new mode> <old blob> <new blob> <status>", then the path.
-            _, mode, _, blob, _ = token[1:].split(" ")
+        if token.startswith(":"):
+            # ":<old mode> <new mode> <old blob> <new blob> <status>", then the
+            # path, or the old and the new path of a rename.
+            _, mode, old, new, status = token[1:].split(" ")
             path = next(tokens)
-            if mode in _REGULAR_FILE and (blob, path) not in seen:
-                seen.add((blob, path))
-                result.append((sha, path, blob))
+            if status.startswith("R"):
+                path = next(tokens)
+            if mode in _REGULAR_FILE and old != new:
+                result.append((sha, path, old, new))
+        elif token:
+            sha = token
     return result
 
 
-def _read_blobs(root: Path, blobs: list[str]) -> Iterator[tuple[str, bytes]]:
-    """Yield the content of each blob of at most MAX_SCAN_BYTES, one at a time.
+def _read_blobs(root: Path, blobs: Iterable[str]) -> Iterator[tuple[str, bytes]]:
+    """Yield the content of each blob of at most MAX_SCAN_BYTES.
 
-    The history holds every version of every file, lock files included, so
-    the contents are not all loaded at once.
+    The history holds every version of every file, lock files included, and
+    blob_contents keeps all it reads in memory, so blobs are read a chunk at
+    a time.
     """
-    request = "".join(f"{blob}\n" for blob in blobs).encode()
-    checked = subprocess.run(
-        ["git", "cat-file", "--batch-check"],
-        cwd=root,
-        input=request,
-        capture_output=True,
-        check=True,
-    ).stdout.decode()
-    small = [
-        fields[0]
-        for fields in map(str.split, checked.splitlines())
-        if len(fields) == 3 and fields[1] == "blob" and int(fields[2]) <= MAX_SCAN_BYTES
-    ]
-    with subprocess.Popen(
-        ["git", "cat-file", "--batch"], cwd=root, stdin=subprocess.PIPE, stdout=subprocess.PIPE
-    ) as process:
-        for blob in small:
-            process.stdin.write(f"{blob}\n".encode())
-            process.stdin.flush()
-            size = int(process.stdout.readline().split()[2])
-            yield blob, process.stdout.read(size + 1)[:size]
-        process.stdin.close()
+    wanted = sorted(set(blobs) - {EMPTY_SHA})
+    for start in range(0, len(wanted), _BLOB_CHUNK):
+        chunk = blob_contents(root, wanted[start : start + _BLOB_CHUNK], MAX_SCAN_BYTES)
+        for blob, data in chunk.items():
+            if data is not None:
+                yield blob, data
+
+
+def _added_lines(old: str, new: str) -> str:
+    """Return `new` with only the lines that a diff from `old` shows as added.
+
+    The other lines are left empty, so that line numbers stay those of `new`.
+    """
+    old_lines = old.split("\n")
+    new_lines = new.split("\n")
+    added = [""] * len(new_lines)
+    matcher = difflib.SequenceMatcher(None, old_lines, new_lines)
+    for tag, _, _, start, end in matcher.get_opcodes():
+        if tag in {"replace", "insert"}:
+            added[start:end] = new_lines[start:end]
+    return "\n".join(added)
 
 
 def unreadable_files(root: Path, tip: str) -> list[tuple[str, str, str]]:
     """Return (commit, path, text) for the history files that gitleaks cannot read.
 
     Git diffs UTF-16 and UTF-32 text as binary, and gitleaks 8.30.1 drops
-    the diff of a path that ends with a backslash.
+    the diff of a path that ends with a backslash. As in a diff, the text
+    holds the lines that the commit added, so that a later commit does not
+    report again what an earlier one added; the other lines are empty.
     """
-    files = history_files(root, tip)
-    backslash = {blob for _, path, blob in files if path.endswith("\\")}
+    changes = history_changes(root, tip)
+    backslash = {new for _, path, _, new in changes if path.endswith("\\")}
     texts: dict[str, str] = {}
     wide = set()
-    for blob, data in _read_blobs(root, sorted({blob for _, _, blob in files})):
+    for blob, data in _read_blobs(root, {new for _, _, _, new in changes}):
         is_wide = data.startswith(_WIDE_BOMS)
         if is_wide or blob in backslash:
             text = decode_text(data)
@@ -240,19 +251,29 @@ def unreadable_files(root: Path, tip: str) -> list[tuple[str, str, str]]:
                 texts[blob] = text
                 if is_wide:
                     wide.add(blob)
-    return [
-        (sha, path, texts[blob])
-        for sha, path, blob in files
-        if blob in texts and (blob in wide or path.endswith("\\"))
+    unreadable = [
+        (sha, path, old, new)
+        for sha, path, old, new in changes
+        if new in texts and (new in wide or path.endswith("\\"))
     ]
+    # A file converted to UTF-16 has an older version that is not, and a
+    # binary one has no line in common with the text.
+    older = {old for _, _, old, _ in unreadable if old not in texts}
+    for blob, data in _read_blobs(root, older):
+        texts[blob] = decode_text(data) or ""
+    result = []
+    for sha, path, old, new in unreadable:
+        added = _added_lines(texts.get(old, ""), texts[new])
+        if added.strip():
+            result.append((sha, path, added))
+    return result
 
 
-def _safe_path(path: str) -> str:
-    """Return a relative path to write a history file to, keeping its name when safe."""
-    parts = PurePosixPath(path).parts
-    if not parts or path.startswith("/") or any(part in {".", ".."} for part in parts):
-        return "file"
-    return path
+def _without_allow_marker(text: str) -> str:
+    """Return text without the comment that makes gitleaks skip a line."""
+    while _ALLOW_MARKER in text:
+        text = text.replace(_ALLOW_MARKER, "")
+    return text
 
 
 def scan_texts(
@@ -263,29 +284,44 @@ def scan_texts(
     files: Iterable[tuple[str, str, str]],
 ) -> list[Finding]:
     """Scan commit messages, the pull request text and history files written out as text."""
+    entries = [
+        (f"messages/{commit.sha}", commit.message, Finding("", 0, commit.sha))
+        for commit in messages
+    ]
+    if pr is not None:
+        entries.append(("pull-request/title", pr.title, Finding("", 0, field="title")))
+        entries.append(("pull-request/body", pr.body, Finding("", 0, field="body")))
+    entries += [
+        (f"files/{index}", text, Finding("", 0, sha, path))
+        for index, (sha, path, text) in enumerate(files)
+    ]
     texts = work / "texts"
-    sources: dict[str, Finding] = {}
-
-    def add(relative: str, text: str, source: Finding) -> None:
+    written = 0
+    for relative, text, _ in entries:
+        # gitleaks skips, without saying so, a file whose name contains an
+        # archive extension such as .br or .zip, or whose content starts like
+        # a PDF, an executable or another binary format. So the names are
+        # generated, each text starts with a line feed, and the scan must
+        # have read every byte.
+        data = b"\n" + _without_allow_marker(text).encode("utf-8", errors="replace")
         target = texts / relative
         target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(text, encoding="utf-8")
-        sources[relative] = source
-
-    for commit in messages:
-        add(f"messages/{commit.sha}", commit.message, Finding("", 0, commit.sha))
-    if pr is not None:
-        add("pull-request/title", pr.title, Finding("", 0, field="title"))
-        add("pull-request/body", pr.body, Finding("", 0, field="body"))
-    for index, (sha, path, text) in enumerate(files):
-        add(f"files/{index}/{_safe_path(path)}", text, Finding("", 0, sha, path))
-    report, _ = gitleaks.run("dir", str(texts))
+        target.write_bytes(data)
+        written += len(data)
+    report, log = gitleaks.run("dir", str(texts))
+    scanned = _BYTES_SCANNED.search(log)
+    if not scanned or int(scanned.group(1)) < written:
+        raise CheckError(
+            "gitleaks skipped some of the commit messages, pull request text and files"
+            " given to it, so they were not checked."
+        )
+    sources = {relative: source for relative, _, source in entries}
     findings = []
     for item in report:
         source = sources[PurePosixPath(item["File"]).relative_to(texts).as_posix()]
-        findings.append(
-            Finding(item["RuleID"], item["StartLine"], source.commit, source.path, source.field)
-        )
+        # The line feed at the start is line 1.
+        line = item["StartLine"] - 1
+        findings.append(Finding(item["RuleID"], line, source.commit, source.path, source.field))
     return findings
 
 

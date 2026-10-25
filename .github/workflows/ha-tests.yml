@@ -10,9 +10,9 @@ name: Home Assistant tests
 #
 # Coverage is measured with the workflow's own configuration: the coverage
 # settings of the repository (.coveragerc, setup.cfg, tox.ini,
-# pyproject.toml) are not read, so only the lines marked with
-# "# pragma: no cover - <reason>" are excluded, and a pragma without a
-# reason fails the job.
+# pyproject.toml) are not read. Only the lines marked with
+# "# pragma: no cover - <reason>", "if TYPE_CHECKING:" blocks and "..."
+# stub bodies are excluded, and a pragma without a reason fails the job.
 
 on:
   workflow_call:
@@ -34,7 +34,7 @@ on:
         type: string
         default: requirements_test.txt
       coverage-source:
-        description: Package or directory measured for coverage.
+        description: Package or directory measured for coverage, as pytest imports or finds it.
         type: string
         default: custom_components
       coverage-minimum:
@@ -145,36 +145,38 @@ jobs:
           COVERAGE_MINIMUM: ${{ inputs.coverage-minimum }}
         run: |
           # Passing this file to pytest-cov and coverage means that no coverage
-          # setting of the repository is read. The report only counts the files
-          # of the coverage source, whatever --cov options the pytest
-          # configuration adds, and fails without data, for example when it
-          # adds --no-cov.
-          source_path="${COVERAGE_SOURCE//.//}"
+          # setting of the repository is read. A bare --cov makes pytest-cov
+          # measure the source of this file only, whatever --cov options the
+          # pytest configuration adds, and the report fails without data, for
+          # example when that configuration adds --no-cov.
+          #
+          # A pragma only excludes code when it gives a reason, with spaces or
+          # tabs as whitespace, so the next step reports every pragma that
+          # excludes nothing. The pragma pattern stays first: on a line of its
+          # own, a pattern starting with "#" would be read as a comment.
           config="${RUNNER_TEMP}/coverage/coveragerc"
           mkdir -p "${RUNNER_TEMP}/coverage"
           cat > "$config" <<EOF
           [run]
           data_file = ${RUNNER_TEMP}/coverage/data
+          source = ${COVERAGE_SOURCE}
           [report]
-          exclude_lines = #\s*(pragma|PRAGMA)[:\s]?\s*(no|NO)\s*(cover|COVER)
-          include =
-              ${source_path}/*
-              ${source_path}.py
+          exclude_lines = #[ \t]*(pragma|PRAGMA)[: \t]?[ \t]*(no|NO)[ \t]*(cover|COVER)[ \t]*[-:][ \t]*[A-Za-z0-9]
+              ^[ \t]*if[ \t]+(typing\.)?TYPE_CHECKING[ \t]*:
+              ^[ \t]*\.\.\.[ \t]*(#.*)?$
           precision = 2
           show_missing = true
           skip_covered = true
           EOF
-          python -m pytest --cov="$COVERAGE_SOURCE" --cov-config="$config" --cov-report=
+          python -m pytest --cov --cov-config="$config" --cov-report=
           python -m coverage report --rcfile="$config" --fail-under="$COVERAGE_MINIMUM"
 
-      # Coverage excludes the lines that match the pragma pattern of the
-      # configuration above (the default one of coverage.py); each must say why.
+      # A pragma without a reason excludes nothing but reads as if it did. The
+      # coverage source can be a package anywhere, so every Python file of the
+      # repository is checked.
       - name: Check coverage pragmas
         if: ${{ !cancelled() }}
-        env:
-          COVERAGE_SOURCE: ${{ inputs.coverage-source }}
         run: |
-          source_path="${COVERAGE_SOURCE//.//}"
           pragma='#[[:space:]]*(pragma|PRAGMA)[:[:space:]]?[[:space:]]*(no|NO)[[:space:]]*(cover|COVER)'
           reason="${pragma}[[:space:]]*[-:][[:space:]]*[[:alnum:]]"
           status=0
@@ -183,8 +185,7 @@ jobs:
               echo "::error::${path}:${number}: give the reason after the pragma, as in \"# pragma: no cover - <reason>\"."
               status=1
             fi
-          done < <(git ls-files -z -- "${source_path}/*.py" "${source_path}.py" \
-            | xargs -0 --no-run-if-empty grep -nHZE "$pragma" --)
+          done < <(git ls-files -z -- '*.py' | xargs -0 --no-run-if-empty grep -nHZE "$pragma" --)
           exit "$status"
 
       - name: Prune uv cache
