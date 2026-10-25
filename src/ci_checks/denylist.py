@@ -85,8 +85,17 @@ _LETTERS_GAP = r"[\W_]*"
 _BEFORE_NUMBER_GAP = r"(?:[^\w,:]|_)*"
 _AFTER_NUMBER_GAP = r"(?:[^\w:]|_)*"
 _NUMBERS_GAP = r"[ ._-]"
-_LONG_NUMBERS_GAP = r"(?:[ \t]++(?:\r?\n[ \t]*+)?|\r?\n[ \t]*+|[._\-\u2010-\u2015\u2212])?"
+_LONG_NUMBERS_SEPARATOR = r"(?:[ \t]++(?:\r?\n[ \t]*+)?|\r?\n[ \t]*+|[._\-\u2010-\u2015\u2212])"
+_LONG_NUMBERS_GAP = _LONG_NUMBERS_SEPARATOR + "?"
 LONG_NUMBER_DIGITS = 8
+# The same separators as fixed-width patterns, for lookbehinds, with up to
+# four spaces of indentation.
+_INDENTS = [rf"[ \t]{{{count}}}" if count else "" for count in range(5)]
+_LONG_NUMBERS_BEHIND = [r"[._\-\u2010-\u2015\u2212]", *_INDENTS[1:]] + [
+    newline + indent
+    for newline in (r"\n", r"\r\n", r"[ \t]\n", r"[ \t]\r\n")
+    for indent in _INDENTS
+]
 _SEPARATORS = re.compile(r"[\W_]+")
 # The digits of hexadecimal numbers: hashes spell terms made only of them.
 _HEX_DIGITS = frozenset("0123456789abcdef")
@@ -172,11 +181,8 @@ def _term_pattern(words: list[str], separators: list[str], glued: bool) -> str:
     path. Where it starts or ends with a letter, a glued term may touch
     digits, as in "name42" or "v2name".
     """
-    numbers_gap = (
-        _LONG_NUMBERS_GAP
-        if sum(map(str.isdecimal, "".join(words))) >= LONG_NUMBER_DIGITS
-        else _NUMBERS_GAP
-    )
+    long = sum(map(str.isdecimal, "".join(words))) >= LONG_NUMBER_DIGITS
+    numbers_gap = _LONG_NUMBERS_GAP if long else _NUMBERS_GAP
     pattern = re.escape(words[0])
     for (before, word), own in zip(pairwise(words), separators, strict=True):
         between_numbers = before[-1].isdecimal() and word[0].isdecimal()
@@ -193,7 +199,7 @@ def _term_pattern(words: list[str], separators: list[str], glued: bool) -> str:
             # gap already accepts is not added, since two ways to match the
             # same text make a failed match retry every combination. Two
             # numbers separated by a comma, as in coordinates, may also have
-            # spaces around it or none.
+            # any white space around it or none.
             if between_numbers and "," in own:
                 written = r"\s*+,\s*+".join(re.escape(part.strip()) for part in own.split(","))
             else:
@@ -203,16 +209,33 @@ def _term_pattern(words: list[str], separators: list[str], glued: bool) -> str:
     if words[0][0].isdecimal():
         start = r"(?<![^\W_])(?<!\d\.)"
         if len(words) > 1 and words[0][-1].isdecimal() and words[1][0].isdecimal():
-            start += r"(?<!\d[ ._-])"
+            # Checked once the first number is found, so that the
+            # lookbehinds only run there.
+            first = re.escape(words[0])
+            for separator in _LONG_NUMBERS_BEHIND if long else [_NUMBERS_GAP]:
+                pattern = pattern.replace(first, first + _not_after_number(separator, first), 1)
     else:
         start = r"(?<![^\W\d_])" if glued else r"(?<![^\W_])"
     if words[-1][-1].isdecimal():
         end = r"(?![^\W_])(?!\.\d)"
         if len(words) > 1 and words[-1][0].isdecimal() and words[-2][-1].isdecimal():
-            end += r"(?![ ._-]\d)"
+            separator = _LONG_NUMBERS_SEPARATOR if long else _NUMBERS_GAP
+            end += rf"(?:(?!{separator}\d)|(?={separator}\d{{1,3}}[^\W\d_]))"
     else:
         end = r"(?![^\W\d_])" if glued else r"(?![^\W_])"
     return start + pattern + end
+
+
+def _not_after_number(separator: str, first: str) -> str:
+    """Return a check that the first number of a term follows no other number.
+
+    A number that ends a word, as in "IPv4" or "eth0", does not count.
+    """
+    ending = rf"{separator}{first}"
+    return (
+        rf"(?:(?<!\d{ending})|(?<=[^\W\d_]\d{ending})"
+        rf"|(?<=[^\W\d_]\d\d{ending})|(?<=[^\W\d_]\d\d\d{ending}))"
+    )
 
 
 def _alternation(terms: Iterable[tuple[str, int, str]]) -> re.Pattern[str] | None:

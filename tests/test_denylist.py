@@ -256,11 +256,28 @@ def test_numbers_inside_a_longer_run_of_numbers(term: str, text: str) -> None:
     assert not Denylist(term).matches(text)
 
 
-def test_terms_next_to_a_single_number() -> None:
-    # Only a term that starts or ends with two numbers is part of a run.
-    assert Denylist("bus 917").matches("bus 917 2 stops")
-    assert Denylist("12.3.0").matches("(12 3 0) and 4")
-    assert Denylist("4.7.21").matches("version 4.7.21, build 9")
+@pytest.mark.parametrize(
+    ("term", "text"),
+    [
+        # Only a term that starts or ends with two numbers is part of a run.
+        ("bus 917", "bus 917 2 stops"),
+        ("12 rue Quillmore", "5 12 rue Quillmore"),
+        ("12.3.0", "(12 3 0) and 4"),
+        ("4.7.21", "version 4.7.21, build 9"),
+        # A number that ends or starts a word is not part of a run.
+        ("4.7.21", "Bluefinch2 4.7.21"),
+        ("4.7.21", "IPv4 4.7.21"),
+        ("12.3.0", "eth0 12.3.0"),
+        ("12.3.0", "x12 12.3.0"),
+        ("12.3.0", "12.3.0 2nd try"),
+        ("06 39 98 12 34", "room B2 06 39 98 12 34"),
+        ("06 39 98 12 34", "call 06 39 98 12 34 3x"),
+        # A blank line ends the run.
+        ("06 39 98 12 34", "Tel 06 39 98 12 34\n\n2. Next"),
+    ],
+)
+def test_terms_next_to_numbers_that_are_not_a_run(term: str, text: str) -> None:
+    assert Denylist(term).matches(text)
 
 
 LONG_NUMBERS = Denylist("06 39 98 12 34\n3e:22:fb:12:34:56")
@@ -272,6 +289,7 @@ LONG_NUMBERS = Denylist("06 39 98 12 34\n3e:22:fb:12:34:56")
         "0639981234",
         "06\N{EN DASH}39\N{EN DASH}98\N{EN DASH}12\N{EN DASH}34",
         "06\N{MINUS SIGN}39\N{EM DASH}98-12_34",
+        "06\N{HYPHEN}39\N{FIGURE DASH}98\N{HORIZONTAL BAR}12 34",
         "06  39 98 12 34",
         "06\N{NO-BREAK SPACE}39\N{NARROW NO-BREAK SPACE}98 12 34",
         "06 39 98\n    12 34",
@@ -295,15 +313,40 @@ def test_long_numbers_match_their_usual_spellings(text: str) -> None:
         "06 39 98 / 12 34",
         "06 39 98\n\n12 34",
         "06 - 39 98 12 34",
+        # Longer runs, written with the separators of long numbers.
+        "06\N{EN DASH}39\N{EN DASH}98\N{EN DASH}12\N{EN DASH}34\N{EN DASH}56",
+        "1\N{EN DASH}06\N{EN DASH}39\N{EN DASH}98\N{EN DASH}12\N{EN DASH}34",
+        "06  39  98  12  34  56",
+        "06\t39\t98\t12\t34\t56",
+        "06 39 98 12 34\n56",
+        "56\n    06 39 98 12 34",
+        "+33 06 39 98 12 34",
     ],
 )
 def test_long_numbers_keep_their_limits(text: str) -> None:
     assert not LONG_NUMBERS.matches(text)
 
 
-@pytest.mark.parametrize("text", ["12  3 0", "12\N{EN DASH}3\N{EN DASH}0", "12 3\n0", "1230"])
-def test_short_numbers_keep_the_strict_rule(text: str) -> None:
-    assert not Denylist("12.3.0").matches(text)
+@pytest.mark.parametrize(
+    ("term", "text"),
+    [
+        ("12.3.0", "12  3 0"),
+        ("12.3.0", "12\N{EN DASH}3\N{EN DASH}0"),
+        ("12.3.0", "12 3\n0"),
+        ("12.3.0", "1230"),
+        # Seven digits are still a short number.
+        ("192.0.2.47", "1920247"),
+        ("192.0.2.47", "192  0 2 47"),
+        # Only the digits count, not the letters of the term.
+        ("Quillmore 12 34 Bluefinch", "Quillmore 1234 Bluefinch"),
+    ],
+)
+def test_short_numbers_keep_the_strict_rule(term: str, text: str) -> None:
+    assert not Denylist(term).matches(text)
+
+
+def test_eight_digits_make_a_long_number() -> None:
+    assert Denylist("192.0.2.147").matches("19202147")
 
 
 @pytest.mark.parametrize(
@@ -323,6 +366,8 @@ def test_numbers_separated_by_a_comma(term: str, text: str) -> None:
 def test_numbers_separated_by_a_comma_keep_the_rest_of_the_separator() -> None:
     assert not Denylist("32.87336, -117.22743").matches("32.87336, 117.22743")
     assert not Denylist("12.3.0").matches("12, 3, 0")
+    # Only between two numbers: a word and a number keep their rule.
+    assert not Denylist("Quillmore, 12").matches("Quillmore , 12")
 
 
 def test_terms_are_grouped_by_their_first_character() -> None:
