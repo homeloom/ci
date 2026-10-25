@@ -313,6 +313,10 @@ LONG_NUMBERS = Denylist("06 39 98 12 34\n3e:22:fb:12:34:56")
         "06 39 98 \r\n\t12 34",
         "06.39.98.12.34",
         "06 - 39 98 12 34",
+        # A dash with spaces around it does not continue a run of numbers.
+        "1 - 06 39 98 12 34",
+        "2026-10-25 - 06 39 98 12 34",
+        "06 39 98 12 34 - 56",
         "06 \N{EN DASH} 39 \N{EN DASH} 98 \N{EN DASH} 12 \N{EN DASH} 34",
         "3e22fb123456",
         "3e22.fb12.3456",
@@ -331,8 +335,6 @@ def test_long_numbers_match_their_usual_spellings(text: str) -> None:
         "06 39 98 12 34 56",
         "06 39 98 / 12 34",
         "06 39 98\n\n12 34",
-        "06 39 98 12 34 - 56",
-        "56 - 06 39 98 12 34",
         # Longer runs, written with the separators of long numbers.
         "06\N{EN DASH}39\N{EN DASH}98\N{EN DASH}12\N{EN DASH}34\N{EN DASH}56",
         "1\N{EN DASH}06\N{EN DASH}39\N{EN DASH}98\N{EN DASH}12\N{EN DASH}34",
@@ -762,6 +764,7 @@ def test_terms_over_lines_that_decode_twice() -> None:
     # The lines around a line that decodes twice are searched with it.
     denylist = Denylist("Bluefinch Quillmore")
     assert denylist.spans("intro\nBluefinch\n&amp;#81;uillmore\nend") == [(2, 3)]
+    assert denylist.spans("intro\nBluefinch\n\n\n&amp;#81;uillmore") == [(2, 5)]
 
 
 def test_upper_case_escapes_stay_whole_in_camel_case_names() -> None:
@@ -790,10 +793,10 @@ def test_numeric_references_of_any_length() -> None:
 
 def test_mask_values_of_numbers() -> None:
     values = Denylist("12.30\n12.3.0\n06 39 98 12 34").mask_values()
-    assert {"12.30", "12 30", "12.3.0", "12 3 0", "12 3.0"} <= values
-    assert not {"1230", "12-30", "12_30", "12-3-0"} & values
+    assert {"12.30", "12 30", "12_30", "12.3.0", "12 3 0", "12-3-0", "12_3.0"} <= values
+    assert not {"1230", "12-30", "123.0", "12.30.0"} & values
     assert {"06 39 98 12 34", "0639981234", "06-39-98-12-34", "06.39.98.12.34"} <= values
     # Terms of more than three words use one separator everywhere.
     values = Denylist("192.0.2.47\nZorble 1 2 Quix").mask_values()
-    assert {"192.0.2.47", "192 0 2 47", "zorble_1 2_quix", "zorble-1 2-quix"} <= values
-    assert not {"1920247", "192-0-2-47", "zorble_1_2_quix"} & values
+    assert {"192.0.2.47", "192-0-2-47", "zorble_1_2_quix", "zorble-1 2-quix"} <= values
+    assert not {"1920247", "zorble-1-2-quix", "zorble12quix"} & values

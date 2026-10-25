@@ -16,18 +16,18 @@ All notable changes to this project are documented here. The format follows
   match `step 12`.
 - Denylist: letters may come right before a term that starts with a dotted
   number, as in `v12.3.0`.
-- Denylist: a term that glues letters and digits, such as `Name5G`, also
+- Denylist: a term that glues digits after letters, such as `Name5G`, also
   matches `Name 5G`.
 - Denylist: where a camel case term has a part of three letters or less, as
-  in `LeBlanc`, white space no longer separates its parts, so that it does
-  not match the words of a sentence.
+  in `LeBlanc`, only nothing or one punctuation character may separate its
+  parts, so that it does not match the words of a sentence.
 - Denylist: phone numbers and other terms of eight digits or more also
   match with a dash and spaces around it between their numbers.
 - The contribution guide template and `AGENTS.md` ask for tests that do not
   depend on the machine that runs them.
-- Masking: between two numbers of a short term, only the separator of the
-  term and a space are masked, so that spellings such as `1230` or `12-30`
-  stay readable in logs.
+- Masking: two numbers of a short term are no longer masked glued, nor with
+  a dash when the term has only two numbers in a row, so that spellings
+  such as `1230` or `12-30` stay readable in logs.
 
 ### Fixed
 

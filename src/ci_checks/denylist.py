@@ -82,15 +82,15 @@ _MARK_IN_ESCAPE = re.compile(
     r"(\\x[0-9A-Fa-f]?|\\u[0-9A-Fa-f]{0,3}|\\U[0-9A-Fa-f]{0,7}|%[0-9a-f]|&#x[0-9A-Fa-f]{0,5})"
     r"\x00(?=[0-9A-F])"
 )
-# Where a letter meets a digit in a term, as in "Name5G", which also matches
+# Where digits follow a letter in a term, as in "Name5G", which also matches
 # "Name 5G".
 _LETTER_DIGIT = re.compile(r"(?<=[^\W\d_])(?=\d)")
 # What may separate two words of a term, besides the separator the term
 # itself uses there. Between letters: anything but letters and digits, or
 # nothing, so that "First Last" also matches "first_last" and "FirstLast".
 # Where a term written in camel case has a part of three letters or less,
-# as in "LeBlanc", no white space there, so that it does not match the
-# words "le blanc" of a sentence. Before a number, a comma or a colon only
+# as in "LeBlanc", nothing or one punctuation character there, so that it
+# does not match the words "le blanc" of a sentence. Before a number, a comma or a colon only
 # right after the word and followed by white space, as in "Quillmore
 # Lane, 12": they also separate the values of a list or a mapping, and
 # "step 12" does not match '"step": 12' or '["step", 12]'. After a number,
@@ -108,17 +108,16 @@ _BEFORE_NUMBER_GAP = r"(?:[,:][ \t]++)?+(?:[^\w,:]|_)*+"
 _AFTER_NUMBER_GAP = r"(?:[^\w:]|_)*"
 _NUMBERS_GAP = r"[ ._-]"
 _DASHES = r"[\-\u2010-\u2015\u2212]"
-_LONG_NUMBERS_SEPARATOR = rf"(?:[ \t]*+{_DASHES}[ \t]*+|[._]|[ \t]++(?:\r?\n[ \t]*+)?|\r?\n[ \t]*+)"
-_LONG_NUMBERS_GAP = _LONG_NUMBERS_SEPARATOR + "?"
+# A run of numbers only continues with the separators written without
+# spaces around them, so that "1 - 06 39 98 12 34" still holds the term.
+_LONG_NUMBERS_SEPARATOR = rf"(?:{_DASHES}|[._]|[ \t]++(?:\r?\n[ \t]*+)?|\r?\n[ \t]*+)"
+_LONG_NUMBERS_GAP = rf"(?:[ \t]*+{_DASHES}[ \t]*+|{_LONG_NUMBERS_SEPARATOR})?"
 LONG_NUMBER_DIGITS = 8
 # The same separators as fixed-width patterns, for lookbehinds, with up to
 # four spaces of indentation.
 _INDENTS = [rf"[ \t]{{{count}}}" if count else "" for count in range(5)]
 _LONG_NUMBERS_BEHIND = [
     r"[._\-\u2010-\u2015\u2212]",
-    rf"[ \t]{_DASHES}",
-    rf"{_DASHES}[ \t]",
-    rf"[ \t]{_DASHES}[ \t]",
     *_INDENTS[1:],
 ] + [
     newline + indent
@@ -356,8 +355,8 @@ class Denylist:
     least MIN_BINARY_TERM letters and digits also match as a part of a camel
     case name, as in "getFirstLast", and, unless only hexadecimal digits
     spell them, next to digits, as in "FirstLast2". Short parts of a camel
-    case term are not separated by white space: "LeBlanc" does not match
-    "le blanc". "Name5G" also matches "Name 5G". "12.3.0" matches "12 3 0",
+    case term are separated by nothing or one punctuation character only:
+    "LeBlanc" does not match "le blanc". "Name5G" also matches "Name 5G". "12.3.0" matches "12 3 0",
     "12_3_0" and "v12.3.0", but not "2026-12-30", "12:30", "1230" or
     "v1.12.3.0".
     """
@@ -475,8 +474,16 @@ class Denylist:
         reach = max(self.longest_term - 1, 0)
         kept = set()
         for number, (line, decoded) in enumerate(zip(old, new, strict=True)):
-            if line != decoded:
-                kept.update(range(number - reach, number + reach + 1))
+            if line == decoded:
+                continue
+            kept.add(number)
+            # Blank lines do not count, since a term may span them.
+            for step in (-1, 1):
+                other, left = number + step, reach
+                while left and 0 <= other < len(new):
+                    kept.add(other)
+                    left -= bool(new[other].strip())
+                    other += step
         return "\n".join(line if number in kept else "" for number, line in enumerate(new))
 
     @staticmethod
@@ -578,14 +585,24 @@ class Denylist:
                 words, own = _split(_CAMEL.sub(" ", base))
                 if not words:
                     continue
-                # Between two numbers of a short term, only the separator of
-                # the term and a space: "1230" and "12-30" are common in logs.
+                # Between two numbers of a short term, no glued spelling, nor
+                # a dash when the term has only two numbers in a row: "1230"
+                # and "12-30" are common in logs, in dates and times.
                 long = sum(map(str.isdecimal, "".join(words))) >= LONG_NUMBER_DIGITS
+                pairs = list(zip(pairwise(words), own, strict=True))
+                numbers = [
+                    before[-1].isdecimal() and word[0].isdecimal() for (before, word), _ in pairs
+                ]
+                dropped = ("",) if sum(numbers) > 1 else ("", "-")
                 choices = [
-                    tuple(dict.fromkeys((written, " ")))
-                    if not long and before[-1].isdecimal() and word[0].isdecimal()
+                    tuple(
+                        dict.fromkeys(
+                            (written, *(sep for sep in MASK_SEPARATORS if sep not in dropped))
+                        )
+                    )
+                    if between and not long
                     else MASK_SEPARATORS
-                    for (before, word), written in zip(pairwise(words), own, strict=True)
+                    for ((_, _), written), between in zip(pairs, numbers, strict=True)
                 ]
                 separators = (
                     product(*choices)

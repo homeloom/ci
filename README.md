@@ -94,9 +94,10 @@ or nothing at all between the words of a term, so `First Last` also matches
 `first_last`, `First-Last`, `FirstLast` and a `First` that ends one line
 followed by a `Last` that starts the next. A camel case term such as
 `FirstLast` matches the same spellings, except that where one of its parts
-has three letters or less, as in `LeBlanc`, no white space may separate
-them, so that the words `le blanc` of a sentence do not match. A term that
-glues letters and digits, such as `Name5G`, also matches `Name 5G`. Terms of
+has three letters or less, as in `LeBlanc`, only nothing or one punctuation
+character may separate them, so that the words `le blanc` of a sentence do
+not match. A term that glues digits after letters, such as `Name5G`, also
+matches `Name 5G`. Terms of
 five letters and digits or more also match as a part of a camel case name,
 such as `getFirstLast`, and, unless they are spelled only with hexadecimal
 digits, next to digits, such as `FirstLast2`. Numbers follow stricter rules:
@@ -128,9 +129,10 @@ attributions, and not common words, which also match inside names such as
 
 The first step of the job masks the common spellings of each term (as
 written, in lower, upper and title case, without accents, with spaces,
-underscores, hyphens, dots or nothing between words, but only the separator
-of the term or a space between two numbers of a short term, since spellings
-such as `1230` or `12-30` are common in logs) for the rest of the job
+underscores, hyphens, dots or nothing between words, except that two
+numbers of a short term are never masked glued, nor with a dash when the
+term has only two numbers in a row, since spellings such as `1230` or
+`12-30` are common in logs) for the rest of the job
 log, before the checkout prints the branch names. Masking is a safety net
 that cannot cover every spelling: the checks never print a term, and they
 redact the file paths they print.
