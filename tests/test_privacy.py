@@ -28,6 +28,18 @@ APACHE_LICENSE = """
 Capture = pytest.CaptureFixture[str]
 
 
+@pytest.fixture
+def fiction_detected(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Report values reserved for fiction and documentation like real ones.
+
+    Detection tests use those values, so that no test value can belong to a
+    real person, device or place.
+    """
+    monkeypatch.setattr(privacy, "_is_fiction", lambda _digits: False)
+    monkeypatch.setattr(privacy, "DOCUMENTATION_HARDWARE", ())
+    monkeypatch.setattr(privacy, "PLACEHOLDER_COORDINATES", set())
+
+
 @pytest.mark.parametrize(
     ("text", "category"),
     [
@@ -40,28 +52,28 @@ Capture = pytest.CaptureFixture[str]
         ("prefix fd12:3456:789a::1", "private-ip"),
         ("link fe80::1c2b:3a4d:5e6f:7081%eth0", "private-ip"),
         ("snake host_10.0.0.7_backup", "private-ip"),
-        ("home 2a01:e0a:1f2:3b40::1", "public-ip"),
+        ("home 2a00:1111:2222:3333::1", "public-ip"),
         ("contact jane.doe@mail.example-corp.fr", "email"),
         ("author jane.doe+noreply@mail.example-corp.fr", "email"),
         ("author noreply@family-domain.fr", "email"),
         ("idn mail jane@exämple-corp.fr", "email"),
-        ("call +33 6 41 27 93 58", "phone"),
-        ("call 0033 6 41 27 93 58", "phone"),
-        ("call +33\N{NO-BREAK SPACE}6\N{NO-BREAK SPACE}41\N{NO-BREAK SPACE}27 93 58", "phone"),
-        ("call +1-202-418-3907", "phone"),
-        ("call (202) 418-3907", "phone"),
-        ("call 06 41 27 93 58", "phone"),
-        ("call 06.41.27.93.58", "phone"),
-        ("call 0641279358", "phone"),
-        ("call +44 20 7946 1234", "phone"),
+        ("call +33 6 39 98 27 58", "phone"),
+        ("call 0033 6 39 98 27 58", "phone"),
+        ("call +33\N{NO-BREAK SPACE}6\N{NO-BREAK SPACE}39\N{NO-BREAK SPACE}98 27 58", "phone"),
+        ("call +1-202-555-0143", "phone"),
+        ("call (202) 555-0143", "phone"),
+        ("call 06 39 98 27 58", "phone"),
+        ("call 06.39.98.27.58", "phone"),
+        ("call 0639982758", "phone"),
+        ("call +44 20 7946 0738", "phone"),
         ("see https://myhome.example-corp.fr/api", "url"),
         ("see http://user:pw@nas.lan:8080/x", "url"),
-        ("wan http://82.65.12.34:8123/api", "url"),
-        ("wan http://[2a01:e0a::1]:8123", "url"),
-        ("ws wss://myhome.duckdns.org/api/websocket", "url"),
+        ("wan http://11.22.33.44:8123/api", "url"),
+        ("wan http://[2a00:1111::1]:8123", "url"),
+        ("ws wss://zorblequix.duckdns.org/api/websocket", "url"),
         ("cam rtsp://cam.family-domain.net/live", "url"),
         ("broker mqtt://broker.family-domain.net:1883", "url"),
-        ("idn https://maison-dupré.fr", "url"),
+        ("idn https://maison-zorblé.fr", "url"),
         ("footnote https://nas.example-corp.fr\N{SUPERSCRIPT ONE}", "url"),
         ("cd /home/alice/projects", "home-path"),
         ("open /Users/bob/Library", "home-path"),
@@ -75,30 +87,31 @@ Capture = pytest.CaptureFixture[str]
         (r"share \\wsl.localhost\Ubuntu\home\alice\x", "home-path"),
         ("silverblue /var/home/alice/x", "home-path"),
         ("usb /run/media/alice/disk", "home-path"),
-        ("mac 3c:71:bf:4e:92:d5", "mac"),
-        ("mac 3C-71-BF-4E-92-D5", "mac"),
-        ("cisco a4c1.381a.2b3c", "mac"),
-        ('"mac": "A4C1381A2B3C"', "mac"),
-        ("ble_address=a4c1381a2b3c", "mac"),
-        ('wifiMac: "a4c1381a2b3c"', "mac"),
-        ("bssid=a4c1381a2b3c", "mac"),
-        ("ieee 0x00124b0019a3f4c7", "device-id"),
-        ("eui 00:12:4b:00:19:a3:f4:c7", "device-id"),
-        ("ieee_address: 00124b0019a3f4c7", "device-id"),
-        ("extendedAddress=00124b0019a3f4c7", "device-id"),
-        ("node_0x00124b0019a3f4c7", "device-id"),
-        ('"latitude": 48.85661', "coordinates"),
-        ("lon=2.35222", "coordinates"),
-        ("CONF_LATITUDE: 48.85661", "coordinates"),
-        ("home_longitude = 2.35222", "coordinates"),
-        ("homeLat: 48.85661", "coordinates"),
-        ("center: [48.85661, 2.35222]", "coordinates"),
-        ("geojson [2.35222, 48.85661]", "coordinates"),
+        ("mac 00:00:5e:00:53:9d", "mac"),
+        ("mac 00-00-5E-00-53-9D", "mac"),
+        ("cisco 0000.5e00.539d", "mac"),
+        ('"mac": "00005E00539D"', "mac"),
+        ("ble_address=00005e00539d", "mac"),
+        ('wifiMac: "00005e00539d"', "mac"),
+        ("bssid=00005e00539d", "mac"),
+        ("ieee 0x00005eef10a3f4c7", "device-id"),
+        ("eui 00:00:5e:ef:10:a3:f4:c7", "device-id"),
+        ("ieee_address: 00005eef10a3f4c7", "device-id"),
+        ("extendedAddress=00005eef10a3f4c7", "device-id"),
+        ("node_0x00005eef10a3f4c7", "device-id"),
+        ('"latitude": 32.87336', "coordinates"),
+        ("lon=-117.22743", "coordinates"),
+        ("CONF_LATITUDE: 32.87336", "coordinates"),
+        ("home_longitude = -117.22743", "coordinates"),
+        ("homeLat: 32.87336", "coordinates"),
+        ("center: [32.87336, -117.22743]", "coordinates"),
+        ("geojson [-117.22743, 32.87336]", "coordinates"),
         ("range [123.45678, 2.12345]", "coordinates"),
-        ("pinned at 48.85661, 2.35222 on the map", "coordinates"),
-        ("geo:48.8566,2.3522", "coordinates"),
+        ("pinned at 32.87336, -117.22743 on the map", "coordinates"),
+        ("geo:32.8734,-117.2274", "coordinates"),
     ],
 )
+@pytest.mark.usefixtures("fiction_detected")
 def test_generic_findings_detect(text: str, category: str) -> None:
     assert category in privacy.generic_findings(text, ALLOWED)
 
@@ -136,10 +149,12 @@ def test_generic_findings_detect(text: str, category: str) -> None:
         "devcontainer /home/vscode/.cache and ~/home/x and ./home/x",
         "media /media/recordings/cam.mp4 and /config/www and /Volumes/Data/x",
         "placeholder aa:bb:cc:dd:ee:ff and 00:00:5e:00:53:01",
-        "sequential 3c:22:fb:12:34:56 and 00:11:22:33:44:55 and de:ad:be:ef:ca:fe",
+        "documentation 00005e00539d and eui 00:00:5e:ef:10:a3:f4:c7 and 0x00005eef10a3f4c7",
+        "fiction mobile 06 39 98 27 58 and +44 20 7946 0738",
+        "sequential 3e:22:fb:12:34:56 and 00:11:22:33:44:55 and de:ad:be:ef:ca:fe",
         "frame 01:03:00:0a:00:02 and mask ff:ff:ff:ff:ff:00",
-        "sha a4c1381a2b3c and commit 1234567890ab",
-        "zigbee 0x0000000000000000 and 0x0123456789abcdef and 0x00158d0001a2b3c4",
+        "sha a6c1381a2b3c and commit 1234567890ab",
+        "zigbee 0x0000000000000000 and 0x0123456789abcdef and 0x02158d0001a2b3c4",
         "colors 0xff00ff00ff00ff00",
         '"latitude": 32.87336, "longitude": -117.22743',
         "latitude: 0.000 and ratio lat: 1.5 and flat: 2.345",
@@ -242,9 +257,10 @@ def make_check(
     return privacy.PrivacyCheck(root, privacy.Denylist(denylist), (), exclude, Reporter("Privacy"))
 
 
+@pytest.mark.usefixtures("fiction_detected")
 def test_findings_apply_pragmas_to_every_line_of_a_match() -> None:
     check = make_check(None)
-    text = "center: [48.85661,\n    2.35222]  # ci-allow: coordinates\n"
+    text = "center: [32.87336,\n    -117.22743]  # ci-allow: coordinates\n"
     assert check.findings(text, generic=True) == []
     found = check.findings(text.replace("ci-allow", "see"), generic=True)
     assert found == [privacy.Finding(1, 2, "coordinates")]
@@ -276,9 +292,9 @@ def test_check_files(repo: Repo, capsys: Capture) -> None:
 
 
 def test_check_files_reads_legacy_encodings(repo: Repo, capsys: Capture) -> None:
-    repo.write("contacts.csv", "name;city\nHélène Dupont;Lyon\n".encode("cp1252"))
+    repo.write("contacts.csv", "name;place\nQuillène Zorbefort;Ørsted Lane\n".encode("cp1252"))
     repo.write("notes.txt", "ok\r\nhost 10.0.0.2\r\n".encode("utf-16-le"))
-    check = make_check(repo, denylist="Hélène Dupont")
+    check = make_check(repo, denylist="Quillène Zorbefort")
     check.check_files(["contacts.csv", "notes.txt"])
     out = capsys.readouterr().out
     assert check.reporter.count == 2

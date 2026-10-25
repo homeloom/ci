@@ -207,6 +207,9 @@ FICTION_PHONE_PREFIXES = (
     "442079460",
     "447700900",
 )
+# Hardware address ranges reserved for documentation (RFC 7042): MAC-48
+# and EUI-64.
+DOCUMENTATION_HARDWARE = ("00005e0053", "00005eef10")
 # Coordinates used by the Home Assistant test harness.
 PLACEHOLDER_COORDINATES = {"32.87336", "-117.22743"}
 HOME_DIRECTORY_PLACEHOLDERS = {
@@ -536,24 +539,27 @@ def _real_hex(digits: str) -> bool:
     return not _is_placeholder_hex(digits) and not _is_byte_data(digits)
 
 
+def _real_hardware(digits: str) -> bool:
+    return _real_hex(digits) and not digits.lower().startswith(DOCUMENTATION_HARDWARE)
+
+
 def _mac(text: str, _allowed: tuple[str, ...]) -> Iterator[Span]:
     for kind, span, digits in _hex_addresses(text):
-        if kind == "mac" and _real_hex(digits) and not digits.lower().startswith("00005e0053"):
-            yield span  # 00:00:5e:00:53 is the RFC 7042 documentation range.
+        if kind == "mac" and _real_hardware(digits):
+            yield span
     for pattern in (_MAC_DOTTED, _MAC_BARE):
         for match in pattern.finditer(text):
-            digits = match.group(1).replace(".", "")
-            if _real_hex(digits) and not digits.lower().startswith("00005e0053"):
+            if _real_hardware(match.group(1).replace(".", "")):
                 yield match.span(1)
 
 
 def _device_id(text: str, _allowed: tuple[str, ...]) -> Iterator[Span]:
     for kind, span, digits in _hex_addresses(text):
-        if kind == "device-id" and _real_hex(digits):
+        if kind == "device-id" and _real_hardware(digits):
             yield span
     for pattern in (_EUI64, _EUI64_BARE):
         for match in pattern.finditer(text):
-            if _real_hex(match.group(1)):
+            if _real_hardware(match.group(1)):
                 yield match.span(1)
 
 

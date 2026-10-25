@@ -42,7 +42,7 @@ def test_decode_text() -> None:
     assert _common.decode_text(b"caf\xc3\xa9") == "café"
     assert _common.decode_text(b"\xef\xbb\xbfhi") == "hi"
     # Bytes that are not UTF-8 are read as Windows-1252, as spreadsheets save them.
-    assert _common.decode_text("Hélène;Noël\n".encode("cp1252")) == "Hélène;Noël\n"
+    assert _common.decode_text("Quillène;Zorbël\n".encode("cp1252")) == "Quillène;Zorbël\n"
     assert _common.decode_text(b"caf\xc3\xa9 and caf\xe9 \x81") == "café and café \x81"
     # UTF-16 without a byte order mark, as some Windows tools write it.
     assert _common.decode_text("host: é\r\n".encode("utf-16-le")) == "host: é\r\n"

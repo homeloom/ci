@@ -98,11 +98,11 @@ def test_jpeg_segments() -> None:
         jpeg_segment(0xE0, b"JFIF\0\x01\x02"),
         exif_segment(tiff([ascii_field(ARTIST, "Bluefinch")], gps_position())),
         jpeg_segment(0xFE, b"taken at home"),
-        iptc_segment((2, 80, b"Ada Lovelace"), (1, 90, b"\x1b%G"), (2, 120, b"caption")),
+        iptc_segment((2, 80, b"Ada Quillmore"), (1, 90, b"\x1b%G"), (2, 120, b"caption")),
         b"\xff\xd0",  # A marker without a length.
     )
     metadata = read_metadata(data)
-    assert sorted(metadata.texts) == ["Ada Lovelace", "Bluefinch", "caption", "taken at home"]
+    assert sorted(metadata.texts) == ["Ada Quillmore", "Bluefinch", "caption", "taken at home"]
     assert metadata.location
 
 
