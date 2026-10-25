@@ -504,7 +504,7 @@ def test_check_changes_finds_content_removed_later(repo: Repo, capsys: Capture) 
     )
     repo.write("fixtures/data.txt", "10.0.0.5\n")
     repo.write("LICENSE", "https://nas.zorble.internal\n")
-    repo.write("image.bin", b"\0 Artist: Bluefinch \0")
+    repo.write("image.bin", b"\0 Artist: Bluefinch \0 gitleaks:allow \0")
     repo.write("docs/bluefinch.md", "ok\n")
     repo.write("docs/wrapped.md", "We meet at rue des\nLilas.\n")
     repo.write("photo.jpg", jpeg(exif_segment(tiff([], gps_position()))))
@@ -518,11 +518,13 @@ def test_check_changes_finds_content_removed_later(repo: Repo, capsys: Capture) 
     out = capsys.readouterr().out
     short = leak[:12]
     assert check.reporter.count == 6
+    assert out.count("gitleaks:allow") == 2
     assert f"Commit {short}: notes.md:2: an added line may contain personal data" in out
     assert f"Commit {short}: notes.md:3: an added line has a denylisted term." in out
     assert f"Commit {short}: notes.md:5: gitleaks:allow hides the line" in out
     assert out.count(f"Commit {short}: a file path contains a denylisted term.") == 1
     assert f"Commit {short}: image.bin: binary content contains a denylisted term." in out
+    assert f"Commit {short}: image.bin: gitleaks:allow in binary content hides lines" in out
     assert f"Commit {short}: docs/wrapped.md:1: an added line has a denylisted term." in out
     assert f"Commit {short}: photo.jpg: the file metadata may contain personal data" in out
     assert "notes.md:1:" not in out
@@ -919,3 +921,20 @@ def test_main_missing_denylist(
 
 def test_random_bytes_are_binary() -> None:
     assert privacy.decode_text(b"\0" + os.urandom(100)) is None
+
+
+def test_gitleaks_allow_in_binary_content_is_reported_once(repo: Repo, capsys: Capture) -> None:
+    repo.write("README.md", "# Demo\n")
+    base = repo.commit()
+    shas = []
+    for tail, marker in (("one", "a"), ("two", "a"), ("three", "b")):
+        repo.write("data.bin", f"\0head\nkey {marker} gitleaks:allow\n\0{tail}\n".encode())
+        shas.append(repo.commit())
+    repo.write("data.bin", b"\0head\n\0four\n")
+    repo.commit()
+    check = make_check(repo)
+    check.check_changes(history(repo, base), exempt=set())
+    out = capsys.readouterr().out
+    assert out.count("gitleaks:allow in binary content") == 2
+    assert f"Commit {shas[0][:12]}: data.bin: gitleaks:allow" in out
+    assert f"Commit {shas[2][:12]}: data.bin: gitleaks:allow" in out

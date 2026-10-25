@@ -235,8 +235,10 @@ are `private-ip`, `public-ip`, `email`, `phone`, `url`, `home-path`, `mac`,
 of. A gitleaks finding can be ignored through `secrets-ignore` (see the
 exemptions below) or gitleaks' own `gitleaks:allow` comment, which works
 only in files git can diff as text: the privacy check warns about every
-added line that uses it, reviewers must question it, and it has no effect
-in commit messages, the pull request text or UTF-16 and UTF-32 files.
+added line that uses it, in text and binary files alike, and reviewers
+must question it. Files over 20 MB are not read, and only get a
+warning that they were not scanned. It has no effect in commit messages,
+the pull request text or UTF-16 and UTF-32 files.
 
 Exemptions, kept narrow on purpose:
 
@@ -422,6 +424,12 @@ uv venv --python 3.12
 uv pip install --require-hashes --requirement requirements-dev.txt
 .venv/bin/python -m pytest
 ```
+
+The secret scan tests need gitleaks on `PATH`, at the version that
+`actions/setup-tools/install.sh` pins; they skip without it, and a test
+fails when another version is found. The tests run git without the global
+and system configuration of the machine, as on a runner, so a test that
+needs a git identity must give one.
 
 ## License
 

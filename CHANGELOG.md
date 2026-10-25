@@ -6,6 +6,16 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Changed
+
+- The contribution guide template and `AGENTS.md` ask for tests that do not
+  depend on the machine that runs them.
+
+### Fixed
+
+- Privacy check: a commit that adds a `gitleaks:allow` line to a binary
+  file gets a warning, as one that adds it to a text file does.
+
 ## [0.1.0]
 
 ### Added

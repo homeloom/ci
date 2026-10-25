@@ -20,6 +20,7 @@ from ci_checks.denylist import Denylist
 from helpers import EventWriter, Repo, pr_event
 
 CONFIG = Path(__file__).resolve().parent.parent / "actions" / "privacy" / "gitleaks.toml"
+INSTALL = CONFIG.parent.parent / "setup-tools" / "install.sh"
 GITLEAKS = shutil.which("gitleaks")
 # CI installs gitleaks, so these tests only skip on a machine without it.
 needs_gitleaks = pytest.mark.skipif(
@@ -290,7 +291,7 @@ def test_main_reads_every_denylist_secret_and_keeps_them_from_gitleaks(
     event({})
     finding = {"RuleID": "jwt", "StartLine": 1, "Commit": sha, "File": "quillmore/settings.json"}
     fake_answers(monkeypatch, {"log": SCANNED, "report": [finding]})
-    names = {"PRIVACY_DENYLIST_PLACES": "Quillmore", "OTHER_TOKEN": "unrelated"}
+    names = {"PRIVACY_DENYLIST_1": "Quillmore", "OTHER_TOKEN": "unrelated"}
     monkeypatch.setenv("CI_SECRETS", json.dumps(names))
     assert scan(repo, fake_gitleaks) == 1
     out = output(capsys)
@@ -839,3 +840,21 @@ def test_secrets_ignore(repo: Repo, event: EventWriter, capsys: Capture) -> None
 
     event({})
     assert scan(repo, None, "--ignore", f"{known}\n{added}\n") == 0
+
+
+def pinned_gitleaks() -> str:
+    script = INSTALL.read_text(encoding="utf-8")
+    block = script[script.index("    gitleaks)") :]
+    return block[block.index('version="') + 9 : block.index('"\n', block.index('version="'))]
+
+
+def test_rules_come_from_the_installed_gitleaks_version() -> None:
+    header = CONFIG.read_text(encoding="utf-8").split("\n\n", 1)[0]
+    assert f"tag v{pinned_gitleaks()}, the version that actions/setup-tools/install.sh" in header
+
+
+@needs_gitleaks
+def test_local_gitleaks_is_the_pinned_version() -> None:
+    assert GITLEAKS
+    found = subprocess.run([GITLEAKS, "version"], capture_output=True, text=True, check=True)
+    assert found.stdout.strip() == pinned_gitleaks()

@@ -20,6 +20,20 @@ def no_denylist_in_environment(monkeypatch: pytest.MonkeyPatch) -> None:
             monkeypatch.delenv(name)
 
 
+@pytest.fixture(autouse=True)
+def no_git_configuration(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Run git as on a runner, without an identity or any other setting."""
+    for name in list(os.environ):
+        if name == "EMAIL" or name.startswith(("GIT_AUTHOR_", "GIT_COMMITTER_", "GIT_CONFIG")):
+            monkeypatch.delenv(name)
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", os.devnull)
+    monkeypatch.setenv("GIT_CONFIG_NOSYSTEM", "1")
+    # Without this, git would guess an e-mail address from the host name.
+    monkeypatch.setenv("GIT_CONFIG_COUNT", "1")
+    monkeypatch.setenv("GIT_CONFIG_KEY_0", "user.useConfigOnly")
+    monkeypatch.setenv("GIT_CONFIG_VALUE_0", "true")
+
+
 @pytest.fixture
 def repo(tmp_path: Path) -> Repo:
     return Repo(tmp_path / "repo")
