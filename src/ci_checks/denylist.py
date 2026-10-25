@@ -7,7 +7,8 @@ such as "v1.12.3.0", lists such as "[12, 3, 0]" and SVG coordinates do not
 match the term "12 3 0", while phone numbers and other terms of eight digits
 or more also match their usual spellings. Text that writes characters as
 escapes (\\u, \\x and \\n escapes, percent-encoding or HTML entities) is
-also matched as it reads once decoded.
+also matched as it reads decoded once and twice, and decoded with a
+backslash followed by a letter left as written.
 """
 
 from __future__ import annotations
@@ -17,7 +18,7 @@ import json
 import re
 import unicodedata
 from collections import Counter
-from collections.abc import Iterable, Iterator, MutableMapping
+from collections.abc import Callable, Iterable, Iterator, MutableMapping
 from itertools import pairwise, product
 from pathlib import PurePosixPath
 
@@ -54,11 +55,12 @@ _HIGH_BYTE = re.compile(rb"[\xa0-\xff]")
 _UTF16LE_RUN = re.compile(rb"(?:[\t\n\r\x20-\x7e\xa0-\xff]\x00){%d,}" % MIN_BINARY_TERM)
 _UTF16BE_RUN = re.compile(rb"(?:\x00[\t\n\r\x20-\x7e\xa0-\xff]){%d,}" % MIN_BINARY_TERM)
 _NOT_PHRASE = re.compile(r"[^\w .,'/:-]+|_+")
-_ESCAPE = re.compile(r"\\[uUx][0-9A-Fa-f]|\\[nrt\\]|%[0-9A-Fa-f]{2}|&#?\w+;")
+_ESCAPE = re.compile(r"\\[uUx][0-9A-Fa-f]|\\[nrtbfv\\]|%[0-9A-Fa-f]{2}|&#?\w")
+_BACKSLASH_LETTER = re.compile(r"\\[nrtbfv]")
 # The escapes of a line, read from left to right as a string literal is.
 _ESCAPES = re.compile(
     r"(?P<backslash>\\\\)|(?P<json>(?:\\u[0-9A-Fa-f]{4})+)|\\U(?P<long>[0-9A-Fa-f]{8})"
-    r"|(?P<bytes>(?:\\x[0-9A-Fa-f]{2})+|(?:%[0-9A-Fa-f]{2})+)|(?P<space>\\[nrt])"
+    r"|(?P<bytes>(?:\\x[0-9A-Fa-f]{2})+|(?:%[0-9A-Fa-f]{2})+)|(?P<space>\\[nrtbfv])"
 )
 # An escape right before or after a word in the text as written: "Marc\\u00e8le"
 # is one word, not the name "Marc", so such words are only matched decoded.
@@ -68,35 +70,75 @@ _ESCAPE_AFTER = re.compile(r"\\u[0-9a-f]{4}|\\x[0-9a-f]{2}|%[0-9a-f]{2}|&#?\w+;"
 _ESCAPE_BEFORE = re.compile(rf"(?:{_ESCAPE_AFTER.pattern}|\\u[0-9a-f]{{8}})\Z")
 _PARTIAL_ESCAPE_BEFORE = re.compile(r"(?:\\u(?P<unicode>[0-9a-f]{1,7})|\\x[0-9a-f]|%[0-9a-f])\Z")
 _ENTITY = re.compile(r"&#?\w+;")
-# A lower case letter followed by a capital, as in "getName".
+# Decimal character references, whose digits html.unescape converts to an
+# integer: Python refuses to convert more than 4,300 decimal digits.
+_DECIMAL_REFERENCE = re.compile(r"&#([0-9]+)")
+# A lower case letter followed by a capital, as in "getName". Camel case
+# names are split with a mark that text does not hold, so that a term can tell
+# these places from white space. Escapes are kept whole, since a capital
+# can be one of their hexadecimal digits, as in "\\xA9".
 _CAMEL = re.compile(r"(?<=[a-z\xdf-\xf6\xf8-\xff])(?=[A-Z\xc0-\xd6\xd8-\xde])")
+_CAMEL_MARK = "\x00"
+# Characters other than Latin-1 letters, or a soft hyphen, between a lower
+# case letter and a capital.
+_BETWEEN_CASES = re.compile(
+    r"(?<=[a-z\xdf-\xf6\xf8-\xff])[^\x00-\xac\xae-\xff]+(?=[A-Z\xc0-\xd6\xd8-\xde])"
+)
+# A mark placed inside an escape, before a capital hexadecimal digit.
+_MARK_IN_ESCAPE = re.compile(
+    r"(\\x[0-9A-Fa-f]?|\\u[0-9A-Fa-f]{0,3}|\\U[0-9A-Fa-f]{0,7}|%[0-9a-f]|&#[xX][0-9A-Fa-f]*)"
+    r"\x00(?=[0-9A-F])"
+)
+# A capital that starts a word after white space, as in "Le Blanc", is marked
+# where a term has a short camel case part (see _SHORT_CAMEL_GAP).
+_WORD_CAPITAL = re.compile(r"(?<=\s)(?=[A-Z\xc0-\xd6\xd8-\xde])")
+_CAPITAL_MARK = "\x01"
+# Where digits follow a letter in a term, as in "Name5G", which also matches
+# "Name 5G".
+_LETTER_DIGIT = re.compile(r"(?<=[^\W\d_])(?=\d)")
 # What may separate two words of a term, besides the separator the term
 # itself uses there. Between letters: anything but letters and digits, or
 # nothing, so that "First Last" also matches "first_last" and "FirstLast".
-# Before a number, no comma or colon, which separate the values of a list
-# or a mapping: "step 12" does not match '"step": 12'. After a number, no
-# colon, but a comma, as in "12, Main Street". Between two numbers, exactly
-# one space, dot, dash or underscore, so that "12 3 0" does not match
-# "2026-12-30", "12:30", "1230" or numbers listed one per line. In terms of
-# eight digits or more, such as phone numbers, the numbers may also be
-# glued or separated by any run of spaces, any dash, or a line break and
-# its indentation, the ways such numbers are written.
+# Where a term written in camel case has a part of three letters or less,
+# as in "LeBlanc", nothing or one punctuation character there, unless the
+# text writes the next part with a capital after white space, as in "Le
+# Blanc", so that it does not match the words "le blanc" of a sentence.
+# Before a number, a comma or a colon only right after the word and
+# followed by spaces or tabs, as in "Quillmore Lane, 12": they also separate
+# the values of a list or a mapping, and "step 12" does not match
+# '"step": 12', '["step", 12]' or "step:" with 12 on the next line. After
+# a number, no colon, but a comma, as in "12, Main Street". Between two
+# numbers, exactly one space, dot, dash or underscore, so that "12 3 0" does
+# not match "2026-12-30", "12:30", "1230" or numbers listed one per line. In
+# terms of eight digits or more, such as phone numbers, the numbers may also
+# be glued or separated by any run of spaces, any dash with or without
+# spaces around it, or a line break and its indentation, the ways such
+# numbers are written.
 _LETTERS_GAP = r"[\W_]*"
-_BEFORE_NUMBER_GAP = r"(?:[^\w,:]|_)*"
+_SHORT_CAMEL_GAP = r"(?:(?:[^\w\x01]|_)*+\x01|(?:[^\w\s]|_)?)"
+MAX_SHORT_CAMEL_PART = 3
+_BEFORE_NUMBER_GAP = r"(?:[,:][ \t]++)?+(?:[^\w,:]|_)*+"
 _AFTER_NUMBER_GAP = r"(?:[^\w:]|_)*"
 _NUMBERS_GAP = r"[ ._-]"
-_LONG_NUMBERS_SEPARATOR = r"(?:[ \t]++(?:\r?\n[ \t]*+)?|\r?\n[ \t]*+|[._\-\u2010-\u2015\u2212])"
-_LONG_NUMBERS_GAP = _LONG_NUMBERS_SEPARATOR + "?"
+_DASHES = r"[\-\u2010-\u2015\u2212]"
+# A run of numbers only continues with the separators written without
+# spaces around them, so that "1 - 06 39 98 12 34" still holds the term.
+_LONG_NUMBERS_SEPARATOR = rf"(?:{_DASHES}|[._]|[ \t]++(?:\r?\n[ \t]*+)?|\r?\n[ \t]*+)"
+_LONG_NUMBERS_GAP = rf"(?:[ \t]*+{_DASHES}[ \t]*+|{_LONG_NUMBERS_SEPARATOR})?"
 LONG_NUMBER_DIGITS = 8
 # The same separators as fixed-width patterns, for lookbehinds, with up to
 # four spaces of indentation.
 _INDENTS = [rf"[ \t]{{{count}}}" if count else "" for count in range(5)]
-_LONG_NUMBERS_BEHIND = [r"[._\-\u2010-\u2015\u2212]", *_INDENTS[1:]] + [
+_LONG_NUMBERS_BEHIND = [
+    r"[._\-\u2010-\u2015\u2212]",
+    *_INDENTS[1:],
+] + [
     newline + indent
     for newline in (r"\n", r"\r\n", r"[ \t]\n", r"[ \t]\r\n")
     for indent in _INDENTS
 ]
 _SEPARATORS = re.compile(r"[\W_]+")
+_WORD_CHARACTER = re.compile(r"[^\W_]")
 # The digits of hexadecimal numbers: hashes spell terms made only of them.
 _HEX_DIGITS = frozenset("0123456789abcdef")
 # Letters that Unicode does not decompose into a base letter and an accent.
@@ -116,6 +158,35 @@ _FOLD = str.maketrans(
     }
 )
 _APOSTROPHES = ("'", "\N{RIGHT SINGLE QUOTATION MARK}")
+# Invisible characters and marks, including the marks that have no combining
+# class, such as the combining grapheme joiner and the variation selectors.
+# Enclosing marks, such as the keycap of "1\ufe0f\u20e3", are kept as
+# separators: dropped, they would glue a keycap digit to the number after it.
+_DROPPED = frozenset({"Cf", "Mn"})
+
+
+class _Marks(dict[int, str]):
+    """A translation table that removes marks and invisible characters, filled as needed."""
+
+    def __missing__(self, code: int) -> str:
+        char = chr(code)
+        dropped = unicodedata.combining(char) or unicodedata.category(char) in _DROPPED
+        self[code] = "" if dropped else char
+        return self[code]
+
+
+_MARKS = _Marks()
+
+
+def _visible(text: str) -> str:
+    """Return text without the invisible characters and marks that folding drops.
+
+    Only those between a lower case letter and a capital are removed, which
+    is where they hide camel case names.
+    """
+    if text.isascii():
+        return text
+    return _BETWEEN_CASES.sub(lambda match: match[0].translate(_MARKS), text)
 
 
 def normalize(text: str) -> str:
@@ -125,12 +196,7 @@ def normalize(text: str) -> str:
     """
     if text.isascii():
         return text.lower()
-    decomposed = unicodedata.normalize("NFKD", text)
-    kept = "".join(
-        char
-        for char in decomposed
-        if not unicodedata.combining(char) and unicodedata.category(char) != "Cf"
-    )
+    kept = unicodedata.normalize("NFKD", text).translate(_MARKS)
     return kept.casefold().translate(_FOLD)
 
 
@@ -142,12 +208,50 @@ def unescape(text: str) -> str | None:
     """
     if not _ESCAPE.search(text):
         return None
-    return "\n".join(_unescape_line(line) for line in text.split("\n"))
+    return "\n".join(
+        _unescape_line(line, _decode) if _ESCAPE.search(line) else line for line in text.split("\n")
+    )
 
 
-def _unescape_line(line: str) -> str:
-    line = html.unescape(_ESCAPES.sub(_decode, line))
+def _letters_as_written(text: str, decoded: str) -> str | None:
+    """Return decoded text with a backslash and a letter left as written, or None.
+
+    None means that the text has no such escape. Words also start after a
+    backslash in Windows paths, as in "C:\\Users\\name".
+    """
+    if not _BACKSLASH_LETTER.search(text):
+        return None
+    lines = decoded.split("\n")
+    for number, line in enumerate(text.split("\n")):
+        if _BACKSLASH_LETTER.search(line):
+            lines[number] = _unescape_line(line, _decode_but_letters)
+    return "\n".join(lines)
+
+
+def _unescape_line(line: str, decode: Callable[[re.Match[str]], str]) -> str:
+    line = _unescape_html(_ESCAPES.sub(decode, line))
     return line.replace("\n", " ").replace("\r", " ")
+
+
+def _unescape_html(text: str) -> str:
+    """Decode HTML references, reading numbers too large for a character as invalid."""
+    return html.unescape(_DECIMAL_REFERENCE.sub(_short_reference, text))
+
+
+def _short_reference(match: re.Match[str]) -> str:
+    digits = match.group(1).lstrip("0") or "0"
+    return f"&#{digits if len(digits) <= 7 else '1114112'}"
+
+
+def split_camel(text: str) -> str:
+    """Split the camel case names of a text with a mark, keeping escapes whole."""
+    split, count = _CAMEL.subn(_CAMEL_MARK, text)
+    if not count or not _ESCAPE.search(text):
+        return split
+    # An escape holds at most four such marks, as in "\\UaBcDeFaB".
+    while (repaired := _MARK_IN_ESCAPE.sub(r"\1", split)) != split:
+        split = repaired
+    return split
 
 
 def _decode(match: re.Match[str]) -> str:
@@ -167,19 +271,30 @@ def _decode(match: re.Match[str]) -> str:
     return " "
 
 
+def _decode_but_letters(match: re.Match[str]) -> str:
+    return match.group(0) if match.group("space") else _decode(match)
+
+
 def _character(code: int) -> str:
     return chr(code) if code <= 0x10FFFF else "\N{REPLACEMENT CHARACTER}"
+
+
+# Where a term that starts with a number may start: after no letter or
+# digit, or after a "v" that starts a word when the text writes the number
+# with a dot, as in "v12.3.0".
+_NUMBER_START = r"(?:(?<![^\W_])|(?<=(?<![^\W_])v)(?=\d+\.\d))"
 
 
 def _term_pattern(words: list[str], separators: list[str], glued: bool) -> str:
     """Return the pattern of a term made of words, with its boundaries.
 
-    A term never touches a letter. Where it starts or ends with a number, it
-    touches no digit either, nor a dot followed by a digit, as in a longer
-    version or address. Where it starts or ends with two numbers, it is not
-    part of a longer run of numbers either, as in the coordinates of an SVG
-    path. Where it starts or ends with a letter, a glued term may touch
-    digits, as in "name42" or "v2name".
+    A term never touches a letter, except that a "v" that starts a word may
+    come right before two numbers separated by a dot, as in "v12.3.0". Where
+    it starts or ends with a number, it touches no digit either, nor a dot
+    followed by a digit, as in a longer version or address. Where it starts
+    or ends with two numbers, it is not part of a longer run of numbers
+    either, as in the coordinates of an SVG path. Where it starts or ends
+    with a letter, a glued term may touch digits, as in "name42" or "v2name".
     """
     long = sum(map(str.isdecimal, "".join(words))) >= LONG_NUMBER_DIGITS
     numbers_gap = _LONG_NUMBERS_GAP if long else _NUMBERS_GAP
@@ -192,9 +307,11 @@ def _term_pattern(words: list[str], separators: list[str], glued: bool) -> str:
             gap = _AFTER_NUMBER_GAP
         elif word[0].isdecimal():
             gap = _BEFORE_NUMBER_GAP
+        elif own == _CAMEL_MARK and min(len(before), len(word)) <= MAX_SHORT_CAMEL_PART:
+            gap = _SHORT_CAMEL_GAP
         else:
             gap = _LETTERS_GAP
-        if gap != _LETTERS_GAP and not re.fullmatch(gap, own):
+        if gap not in (_LETTERS_GAP, _SHORT_CAMEL_GAP) and not re.fullmatch(gap, own):
             # A term always matches as it is written. A separator that the
             # gap already accepts is not added, since two ways to match the
             # same text make a failed match retry every combination. Two
@@ -209,6 +326,7 @@ def _term_pattern(words: list[str], separators: list[str], glued: bool) -> str:
     if words[0][0].isdecimal():
         start = r"(?<![^\W_])(?<!\d\.)"
         if len(words) > 1 and words[0][-1].isdecimal() and words[1][0].isdecimal():
+            start = _NUMBER_START + r"(?<!\d\.)"
             # Checked once the first number is found, so that the
             # lookbehinds only run there.
             first = re.escape(words[0])
@@ -243,15 +361,16 @@ def _alternation(terms: Iterable[tuple[str, int, str]]) -> re.Pattern[str] | Non
 
     Terms are grouped by their first character, behind the check that every
     term starting with a letter needs (no letter before it) or that every
-    term starting with a number needs (no letter or digit before it), so
-    most places in a text fail without trying each term. In a group, longer
-    terms come first, so that a term that extends another is found whole.
+    term starting with a number needs (no letter or digit before it, except
+    a "v" before a dotted number), so most places in a text fail without
+    trying each term. In a group, longer terms come first, so that a term
+    that extends another is found whole.
     """
     groups: dict[str, list[tuple[int, str]]] = {}
     for pattern, size, first in terms:
         groups.setdefault(first, []).append((size, pattern))
     branches = []
-    for numbers, guard in ((False, r"(?<![^\W\d_])"), (True, r"(?<![^\W_])")):
+    for numbers, guard in ((False, r"(?<![^\W\d_])"), (True, _NUMBER_START)):
         alternatives = []
         for first, patterns in sorted(groups.items()):
             if first.isdecimal() == numbers:
@@ -281,8 +400,12 @@ class Denylist:
     "First\\nLast", and the term "FirstLast" matches all of them. Terms of at
     least MIN_BINARY_TERM letters and digits also match as a part of a camel
     case name, as in "getFirstLast", and, unless only hexadecimal digits
-    spell them, next to digits, as in "FirstLast2". "12.3.0" matches
-    "12 3 0" and "12_3_0", but not "2026-12-30", "12:30", "1230" or "v1.12.3.0".
+    spell them, next to digits, as in "FirstLast2". Short parts of a camel
+    case term are separated by nothing or one punctuation character, unless
+    the next part starts with a capital after white space: "LeBlanc" matches
+    "Le Blanc" but not "le blanc". "Name5G" also matches "Name 5G". "12.3.0"
+    matches "12 3 0", "12_3_0" and "v12.3.0", but not "2026-12-30", "12:30",
+    "1230", "v1.12.3.0" or "M12.3 0".
     """
 
     def __init__(self, raw: str) -> None:
@@ -294,19 +417,24 @@ class Denylist:
         self.terms = list(dict.fromkeys(terms))
         # The most words in a term, which is how many lines a term can span.
         self.longest_term = 0
+        self._short_camel = False
         # The pattern of each term, with its size and its first character.
         letters: dict[str, tuple[int, str]] = {}
         for term in self.terms:
             # Camel case is split before case is folded, so that "FirstLast"
-            # also matches "First Last".
-            words, separators = _split(normalize(_CAMEL.sub(" ", term)))
+            # also matches "First Last", and so are letters followed by digits.
+            marked = _LETTER_DIGIT.sub(_CAMEL_MARK, _CAMEL.sub(_CAMEL_MARK, term))
+            words, separators = _split(normalize(marked))
             if words:
                 size = sum(map(len, words))
                 # Short terms, and terms that hexadecimal numbers spell,
                 # would match inside identifiers and hashes if glued.
                 glued = size >= MIN_BINARY_TERM and not set("".join(words)) <= _HEX_DIGITS
-                letters[_term_pattern(words, separators, glued)] = (size, words[0][0])
+                pattern = _term_pattern(words, separators, glued)
+                letters[pattern] = (size, words[0][0])
                 self.longest_term = max(self.longest_term, len(words))
+                # Short camel case parts need the capitals of the text marked.
+                self._short_camel = self._short_camel or _SHORT_CAMEL_GAP in pattern
         self._pattern = _alternation((p, size, first) for p, (size, first) in letters.items())
         # Each term on its own, longest first and by first character, for
         # the places where the longest term found touches an escape. The
@@ -350,39 +478,94 @@ class Denylist:
         return sorted(found)
 
     def _matches(self, text: str) -> Iterator[tuple[int, str, re.Match[str]]]:
-        """Yield the terms found in a text as written and in its decoded form.
+        """Yield the terms found in a text as written and in its decoded forms.
 
-        Both keep the lines of the text. A word next to an escape is skipped,
-        because the escape may stand for a letter of that word; decoding once
-        can leave escapes that were themselves escaped.
-        Each form is also searched with its camel case names split, for the
-        longer terms.
+        Text is decoded twice, for escapes that were themselves escaped, as in
+        "&amp;quot;", and once with a backslash and a letter left as written.
+        Every form keeps the lines of the text. A word next to an escape is
+        skipped, because the escape may stand for a letter of that word. Each
+        form is also searched with its camel case names split, for the longer
+        terms.
         """
         if not self._pattern:
             return
         decoded = unescape(text)
+        # Each form, whether it may touch escapes, and for the forms derived
+        # from the decoded text, how many lines they leave out before each line.
+        sources: list[tuple[str, bool, list[int] | None]] = [(text, decoded is not None, None)]
+        if decoded is not None:
+            sources.append((decoded, True, None))
+            # A word right after a backslash, as in "C:\\Users\\name", loses
+            # its first letter when the backslash and the letter are decoded,
+            # so the lines that hold one are also searched with them as written.
+            for derived in (_letters_as_written(text, decoded), unescape(decoded)):
+                if derived is not None and derived != decoded:
+                    sources.append(self._changed_lines(decoded, derived))
         view = 0
-        for source, guarded in ((text, decoded is not None), (decoded, True)):
-            if source is None:
-                continue
-            views = [(self._pattern, False, normalize(source))]
-            if self._long and _CAMEL.search(source):
-                views.append((self._long, True, normalize(_CAMEL.sub(" ", source))))
+        for source, guarded, left_out in sources:
+            views = [(self._pattern, False, normalize(self._mark_capitals(source)))]
+            # Camel case names are found without the invisible characters and
+            # marks that folding drops, which would otherwise glue their parts.
+            visible = _visible(source)
+            if self._long and _CAMEL.search(visible):
+                views.append((self._long, True, normalize(split_camel(visible))))
             # Folding merges entities that differ by case, accents or invisible
             # characters, so an entity of the folded text counts only when
             # each of its occurrences comes from one that decodes as written.
             decoding = Counter(
                 normalize(entity)
                 for entity in _ENTITY.findall(source)
-                if html.unescape(entity) != entity
+                if _unescape_html(entity) != entity
             )
             occurrences = Counter(_ENTITY.findall(views[0][2]))
             entities = {key for key, count in decoding.items() if occurrences[key] == count}
             for pattern, long_only, folded in views:
                 view += 1
                 singles = self._singles[long_only]
+                position, line = 0, 0
                 for match in self._search(pattern, singles, folded, guarded, entities):
+                    if left_out is not None:
+                        line += folded.count("\n", position, match.start())
+                        position = match.start()
+                        last = line + folded.count("\n", match.start(), match.end())
+                        # A term over a line left out would join words that
+                        # the line separates.
+                        if left_out[last + 1] != left_out[line]:
+                            continue
                     yield view, folded, match
+
+    def _changed_lines(self, before: str, after: str) -> tuple[str, bool, list[int]]:
+        """Return the lines that decoding changed, with the lines a term can span around them.
+
+        Lines without a letter or a digit do not count among the lines a
+        term can span, since its separators may fill them. The other lines
+        are left empty, so that line numbers stay the same, and the result
+        says how many lines are left out before each line.
+        """
+        old, new = before.split("\n"), after.split("\n")
+        reach = max(self.longest_term - 1, 0)
+        changed = [line != decoded for line, decoded in zip(old, new, strict=True)]
+        counted = [_WORD_CHARACTER.search(line) is not None for line in new]
+        kept = changed.copy()
+        # One pass forward and one back: after each changed line, lines are
+        # kept until reach lines that count have been.
+        for numbers in (range(len(new)), range(len(new) - 1, -1, -1)):
+            left = 0
+            for number in numbers:
+                if changed[number]:
+                    left = reach
+                elif left:
+                    kept[number] = True
+                    left -= counted[number]
+        left_out = [0]
+        for keep in kept:
+            left_out.append(left_out[-1] + (not keep))
+        text = "\n".join(line if keep else "" for line, keep in zip(new, kept, strict=True))
+        return text, True, left_out
+
+    def _mark_capitals(self, text: str) -> str:
+        """Mark the capitals that start a word, when a term needs them."""
+        return _WORD_CAPITAL.sub(_CAPITAL_MARK, text) if self._short_camel else text
 
     @staticmethod
     def _search(
@@ -418,7 +601,8 @@ class Denylist:
     def matches_binary(self, data: bytes) -> bool:
         """Return whether the readable strings of binary content contain a term.
 
-        Terms of at least MIN_BINARY_TERM letters count anywhere in a string.
+        Terms of at least MIN_BINARY_TERM letters count anywhere in a string,
+        camel case names included.
         Shorter ones, down to MIN_PHRASE_TERM letters, count only in a
         phrase: a part of a string, between symbols, with several words and
         only letters, digits, spaces and common punctuation, such as a title
@@ -434,11 +618,22 @@ class Denylist:
             run.decode("latin-1") for run in _LATIN_RUN.findall(data) if _HIGH_BYTE.search(run)
         ]
         for run in runs:
-            if self._long and self._long.search(normalize(run)):
+            if self._long and self._in_long(run):
                 return True
             if self._phrase and self._in_phrase(run):
                 return True
-        return bool(self._long) and any(self._long.search(normalize(run)) for run in latin)
+        return bool(self._long) and any(self._in_long(run) for run in latin)
+
+    def _in_long(self, run: str) -> bool:
+        assert self._long is not None  # noqa: S101 - checked by the caller.
+        if self._long.search(normalize(self._mark_capitals(run))):
+            return True
+        # A camel case name holds a term and at least one more letter.
+        if len(run) <= MIN_BINARY_TERM:
+            return False
+        visible = _visible(run)
+        split = split_camel(visible)
+        return split != visible and bool(self._long.search(normalize(split)))
 
     def _in_phrase(self, run: str) -> bool:
         # Split before folding, which turns symbols such as U+00A8 into spaces.
@@ -448,7 +643,7 @@ class Denylist:
             if (
                 len(phrase) >= MIN_PHRASE_LENGTH
                 and " " in phrase
-                and self._phrase.search(normalize(phrase))
+                and self._phrase.search(normalize(self._mark_capitals(phrase)))
             ):
                 return True
         return False
@@ -469,14 +664,36 @@ class Denylist:
         for term in self.terms:
             for base in (term, normalize(term)):
                 values.update(_apostrophe_variants(base))
-                words = _words(_CAMEL.sub(" ", base))
+                words, own = _split(_LETTER_DIGIT.sub(" ", _CAMEL.sub(" ", base)))
                 if not words:
                     continue
-                gaps = len(words) - 1
+                # Between two numbers of a short term, no glued spelling, nor
+                # a dash in a term of two numbers alone, unless the term is
+                # written so: "1230" and "12-30" are common in logs, in dates
+                # and times.
+                long = sum(map(str.isdecimal, "".join(words))) >= LONG_NUMBER_DIGITS
+                pairs = list(zip(pairwise(words), own, strict=True))
+                numbers = [
+                    before[-1].isdecimal() and word[0].isdecimal() for (before, word), _ in pairs
+                ]
+                dropped = ("", "-") if len(words) == 2 else ("",)
+                choices = [
+                    tuple(
+                        dict.fromkeys(
+                            (written, *(sep for sep in MASK_SEPARATORS if sep not in dropped))
+                        )
+                    )
+                    if between and not long
+                    else MASK_SEPARATORS
+                    for ((_, _), written), between in zip(pairs, numbers, strict=True)
+                ]
                 separators = (
-                    product(MASK_SEPARATORS, repeat=gaps)
+                    product(*choices)
                     if len(words) <= MAX_MIXED_SEPARATOR_WORDS
-                    else ((separator,) * gaps for separator in MASK_SEPARATORS)
+                    else (
+                        tuple(separator if separator in choice else choice[0] for choice in choices)
+                        for separator in MASK_SEPARATORS
+                    )
                 )
                 for chosen in separators:
                     values.update(_join(cased, chosen) for cased in _casings(words))
@@ -501,10 +718,6 @@ def _next_to_escape(folded: str, match: re.Match[str], entities: set[str]) -> bo
     digits = len(partial["unicode"] or "")
     missing = 1 if partial["unicode"] is None else (4 if digits < 4 else 8) - digits
     return set(folded[match.start() : match.start() + missing]) <= _HEX_DIGITS
-
-
-def _words(text: str) -> list[str]:
-    return [word for word in re.split(r"[\W_]+", text) if word]
 
 
 def _join(words: list[str], separators: tuple[str, ...]) -> str:

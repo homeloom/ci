@@ -32,21 +32,22 @@ A typical integration CI calls four workflows and ends with a **Report** job
 that needs all of them. Branch protection requires Report only, so adding or
 removing a job never requires a settings change.
 
-- Draft pull requests only run the hygiene job, which takes seconds and
-  finds personal data as soon as it is pushed. Report then fails with
-  "Draft pull request: only the hygiene checks ran". A skipped required check
-  would count as passed, so Report always runs and only passes when every
-  job it needs succeeded.
-- Marking the pull request ready for review starts one full run.
+- Draft pull requests run no job at all, so that work in progress costs no
+  runner minutes. GitHub never merges a draft, so the skipped Report, which
+  branch protection counts as passed, lets nothing through.
+- Marking the pull request ready for review starts one full run. Report runs
+  after failed or cancelled jobs too, and only passes when every job it
+  needs succeeded.
 - Editing the title or body starts a new run, because the title becomes the
   squash commit message and both are checked for personal data.
 - Runs of the same pull request cancel each other. Runs on `main` never do,
   so that every commit is checked.
 
-Push a branch only together with its draft pull request: a branch without
-one is not checked. A force push does not remove anything from GitHub, where
-the old commits stay reachable; if personal data or a secret was pushed,
-tell a maintainer instead.
+Nothing is checked before the pull request is ready for review, so run the
+checks locally on a draft, and never push personal data or a secret: a force
+push does not remove anything from GitHub, where the old commits stay
+reachable. If personal data or a secret was pushed, tell a maintainer
+instead.
 
 The composite actions in `actions/` can also be used on their own. The
 privacy and English actions read the history, so they need a checkout with
@@ -93,36 +94,57 @@ respects word boundaries and accepts any punctuation, underscore, line break
 or nothing at all between the words of a term, so `First Last` also matches
 `first_last`, `First-Last`, `FirstLast` and a `First` that ends one line
 followed by a `Last` that starts the next. A camel case term such as
-`FirstLast` matches the same spellings. Terms of five letters and digits or
-more also match as a part of a camel case name, such as `getFirstLast`, and,
-unless they are spelled only with hexadecimal digits, next to digits, such as
-`FirstLast2`. Numbers follow stricter rules: a number never touches another
-digit or a dot followed by a digit, two numbers are separated by exactly one
-space, dot, dash or underscore, a word and the number after it by anything but
-a comma or a colon, and a number and the word after it by anything but a
-colon. A term that starts or ends with two numbers is not found inside a
-longer run of numbers, such as the coordinates of an SVG path, though a number
-that ends or starts a word, as in `eth0` or `2nd`, does not count. Terms of
-eight digits or more, such as phone numbers, also match with their numbers
-glued or separated by any run of spaces, any dash or a line break, and two
-numbers that a term separates with a comma may have any white space around it
-or none. So `12.3.0` matches `12 3 0` and `12_3_0`, but not `2026-12-30`,
-`12:30`, `1230`, `[12, 3, 0]`, `v1.12.3.0` or `matrix(12 3 0 1 5 5)`,
-`06 39 98 12 34` also matches `0639981234` and `06–39–98–12–34`, and `step 12`
-does not match `"step": 12`. A term always matches as it is written, so
+`FirstLast` matches the same spellings, except that where one of its parts
+has three letters or less, as in `LeBlanc`, only nothing or one punctuation
+character may separate them, unless the text writes the next part with a
+capital after white space, as names are written: `LeBlanc` matches
+`Le Blanc` and `LE BLANC`, but not the words `le blanc` of a sentence. A
+term that glues digits after letters, such as `Name5G`, also matches
+`Name 5G`. Terms of five letters and digits or more also match as a part of
+a camel case name, such as `getFirstLast`, and, unless they are spelled only
+with hexadecimal digits, next to digits, such as `FirstLast2`. Numbers
+follow stricter rules: a number never touches another digit or a dot
+followed by a digit, nor a letter, except a `v` that starts a word before a
+number the text writes with a dot, as in `v12.3.0`; two numbers are
+separated by exactly one space, dot, dash or underscore; a word and the
+number after it by anything but a comma or a colon, unless the comma or
+colon comes right after the word and before a space or a tab, as in
+`Quillmore Lane, 12`, which unquoted lists such as `[bus, 917]` also match;
+and a number and the word after it by anything but a colon. A term that
+starts or ends with two numbers is not found inside a longer run of
+numbers, such as the coordinates of an SVG path, though a number that ends
+or starts a word, as in `eth0` or `2nd`, does not count. Terms of eight
+digits or more, such as phone numbers, also match with their numbers glued
+or separated by any run of spaces, any dash with or without spaces around
+it, or a line break, and two numbers that a term separates with a comma may
+have any white space around it or none. So `12.3.0` matches `12 3 0`,
+`12_3_0` and `v12.3.0`, but not `2026-12-30`, `12:30`, `1230`, `[12, 3, 0]`,
+`v1.12.3.0`, `M12.3 0` or `matrix(12 3 0 1 5 5)`, `06 39 98 12 34` also
+matches `0639981234`, `06–39–98–12–34` and `06 - 39 98 12 34`, and `step 12`
+matches `step: 12` but not `"step": 12`, `["step", 12]` or `step:` followed
+by `12` on the next line. A term always matches as it is written, so
 `03/12/1985` and `12, Quillmore Street` match themselves. Text that writes
-characters as escapes (`\u00e9`, `\x41`, `\n`, `%20`, `&eacute;`) is also
-matched decoded. List only terms that never belong in a repository: not the
-GitHub usernames of maintainers, which appear in noreply addresses and
-attributions, and not common words, which also match inside names such as
-`max_value`, since the denylist has no exceptions.
+characters as escapes (`\u00e9`, `\x41`, `\n`, `\b`, `%20`, `&eacute;`, or
+`&eacute` without a semicolon) is also matched decoded, once and twice, for
+escapes that were themselves escaped, such as `&amp;quot;`, and with a
+backslash followed by a letter left as written, for words that follow a
+backslash, as in `C:\Users\name`. Enclosing marks, such as keycaps, are
+not invisible: they separate what they enclose from what follows. List only
+terms that never belong in a repository: not the GitHub usernames of
+maintainers, which appear in noreply addresses and attributions, and not
+common words, which also match inside names such as `max_value`, since the
+denylist has no exceptions.
 
 The first step of the job masks the common spellings of each term (as
 written, in lower, upper and title case, without accents, with spaces,
-underscores, hyphens, dots or nothing between words) for the rest of the job
-log, before the checkout prints the branch names. Masking is a safety net
-that cannot cover every spelling: the checks never print a term, and they
-redact the file paths they print.
+underscores, hyphens, dots or nothing between words and between letters and
+the digits after them, except that two numbers of a short term are never
+masked glued, and a term of two numbers alone, such as `12 30`, is not
+masked with a dash unless it is written so, since spellings such as `1230`
+or `12-30` are common in logs) for the rest of the job log, before the
+checkout prints the branch names. Masking is a safety net that cannot cover
+every spelling: the checks never print a term, and they redact the file
+paths they print.
 
 The **Hygiene** job checks:
 
