@@ -51,7 +51,7 @@ who changes them, people and AI coding agents alike. They come on top of
   test to get a green run; fix the cause instead.
 - Tests must not depend on the machine that runs them. Runners have no git
   identity, no global git configuration and no secret, so run the suite
-  once with an empty `HOME` and `GIT_CONFIG_NOSYSTEM=1` before asking for a
-  review.
+  once with an empty `HOME`, `GIT_CONFIG_NOSYSTEM=1` and no `EMAIL` variable
+  before asking for a review.
 - Keep CI fast: under five minutes for a typical change.
 - Pin third party actions by full commit SHA.

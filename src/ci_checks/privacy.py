@@ -35,6 +35,7 @@ import argparse
 import ipaddress
 import os
 import re
+import subprocess
 import sys
 from bisect import bisect_right
 from collections.abc import Callable, Iterable, Iterator
@@ -58,6 +59,7 @@ from ci_checks._common import (
     dependency_bot_commits,
     display_path,
     fail,
+    git,
     history_tip,
     load_event,
     matches_any,
@@ -820,7 +822,7 @@ class PrivacyCheck:
             text = _text(data)
             if text is None:
                 self._check_binary(where, None, data, generic)
-                if b"gitleaks:allow" in data:
+                if self._adds_allow_marker(change, data):
                     self.reporter.warning(
                         f"{where}: gitleaks:allow in binary content hides lines from the "
                         "secret scan. Reviewers must confirm that the file holds no secret."
@@ -854,6 +856,25 @@ class PrivacyCheck:
                     f"{where}:{number}: gitleaks:allow hides the line from the secret scan. "
                     "Reviewers must confirm that it holds no secret."
                 )
+
+    def _adds_allow_marker(self, change: Change, data: bytes) -> bool:
+        """Return whether binary content has a gitleaks:allow line its first parent lacks.
+
+        gitleaks reads binary content as text, line by line, and only scans
+        the lines a commit adds.
+        """
+        marked = [line for line in data.split(b"\n") if b"gitleaks:allow" in line]
+        if not marked:
+            return False
+        try:
+            parent = git(
+                "rev-parse", "--verify", "--quiet", f"{change.sha}^:{change.path}", cwd=self.root
+            )
+        except subprocess.CalledProcessError:
+            return True  # The first commit to write the file.
+        previous = blob_contents(self.root, [parent.strip()], MAX_SCAN_BYTES).get(parent.strip())
+        kept = set(previous.split(b"\n")) if previous else set()
+        return any(line not in kept for line in marked)
 
     def check_identities(self, history: Iterable[Commit]) -> None:
         """Check authors, committers and messages of the whole history against the denylist."""

@@ -13,8 +13,8 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
-- Privacy check: a commit that adds a binary file containing
-  `gitleaks:allow` gets a warning, as an added text line does.
+- Privacy check: a commit that adds a `gitleaks:allow` line to a binary
+  file gets a warning, as one that adds it to a text file does.
 
 ## [0.1.0]
 

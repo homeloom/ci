@@ -921,3 +921,20 @@ def test_main_missing_denylist(
 
 def test_random_bytes_are_binary() -> None:
     assert privacy.decode_text(b"\0" + os.urandom(100)) is None
+
+
+def test_gitleaks_allow_in_binary_content_is_reported_once(repo: Repo, capsys: Capture) -> None:
+    repo.write("README.md", "# Demo\n")
+    base = repo.commit()
+    shas = []
+    for tail, marker in (("one", "a"), ("two", "a"), ("three", "b")):
+        repo.write("data.bin", f"\0head\nkey {marker} gitleaks:allow\n\0{tail}\n".encode())
+        shas.append(repo.commit())
+    repo.write("data.bin", b"\0head\n\0four\n")
+    repo.commit()
+    check = make_check(repo)
+    check.check_changes(history(repo, base), exempt=set())
+    out = capsys.readouterr().out
+    assert out.count("gitleaks:allow in binary content") == 2
+    assert f"Commit {shas[0][:12]}: data.bin: gitleaks:allow" in out
+    assert f"Commit {shas[2][:12]}: data.bin: gitleaks:allow" in out

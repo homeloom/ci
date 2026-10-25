@@ -235,11 +235,10 @@ are `private-ip`, `public-ip`, `email`, `phone`, `url`, `home-path`, `mac`,
 of. A gitleaks finding can be ignored through `secrets-ignore` (see the
 exemptions below) or gitleaks' own `gitleaks:allow` comment, which works
 only in files git can diff as text: the privacy check warns about every
-added line that uses it and every added binary file that contains it, and
-reviewers must question it. The warning cannot see it in content the check
-does not read, such as compressed PDF streams and files over 20 MB. It has
-no effect in commit messages, the pull request text or UTF-16 and UTF-32
-files.
+added line that uses it, in text and binary files alike, and reviewers
+must question it. Files over 20 MB are not read, and only get a
+warning that they were not scanned. It has no effect in commit messages,
+the pull request text or UTF-16 and UTF-32 files.
 
 Exemptions, kept narrow on purpose:
 
