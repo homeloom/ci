@@ -134,26 +134,29 @@ jobs:
           scratch="${RUNNER_TEMP}/planted"
           log="${RUNNER_TEMP}/planted.log"
           git init --quiet --initial-branch=main "$scratch"
+          mkdir "$scratch/zorblequix"
           printf '# Notes\n\nAsk zorblequix.\n' > "$scratch/notes.md"
-          git -C "$scratch" add notes.md
+          printf 'Nothing here.\n' > "$scratch/zorblequix/list.md"
+          git -C "$scratch" add notes.md zorblequix/list.md
           git -C "$scratch" -c user.name=ci -c user.email=1+ci@users.noreply.github.com \
             -c commit.gpgsign=false commit --quiet --message "docs: add notes"
           echo '{}' > "${RUNNER_TEMP}/event.json"
           status=0
           CI_EVENT_PATH="${RUNNER_TEMP}/event.json" \
-            python3 -P -m ci_checks.privacy --root "$scratch" > "$log" || status=$?
-          grep -v '^::add-mask::' "$log" | sed 's/^::error /error /'
-          if [[ "$status" -ne 1 ]]; then
-            echo "::error::The check exited with ${status} instead of 1."
+            python3 -P -m ci_checks.privacy --root "$scratch" > "$log" 2>&1 || status=$?
+          grep -v '^::add-mask::' "$log" | sed 's/^::error/error/'
+          fail() {
+            echo "::error::$1"
             exit 1
-          fi
-          if ! grep -qx '::error file=notes.md,line=3::notes.md:3: denylisted term.' "$log"; then
-            echo "::error::The planted term was not reported at notes.md:3."
-            exit 1
-          fi
+          }
+          [[ "$status" -eq 1 ]] || fail "The check exited with ${status} instead of 1."
+          grep -qx '::add-mask::Zorblequix' "$log" || fail "The planted term was not masked."
+          grep -qx '::error file=notes.md,line=3::notes.md:3: denylisted term.' "$log" \
+            || fail "The planted term was not reported at notes.md:3."
+          grep -qx '::error::\[redacted\]/list.md: the file path contains a denylisted term.' "$log" \
+            || fail "The planted term was not redacted from the reported path."
           if grep -v '^::add-mask::' "$log" | grep -qi 'zorblequix'; then
-            echo "::error::The report printed the planted term."
-            exit 1
+            fail "The report printed the planted term."
           fi
 
   report:
