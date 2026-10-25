@@ -1,19 +1,27 @@
 """Reject French text outside translation files.
 
-A line is reported when it holds a word that only exists in French, at least
-three French signals, or two of them and no English function word. French
-signals are short French words that also appear in English text or code,
-such as "le", "des" or "pour", lowercase words with French accents or
-French endings ("-eux", "-ique"), and elisions such as "l'" or "qu'"; each
-counts once. An accent alone proves nothing: capitalized accented words are
-names (Zürich, Réunion) unless they are French words.
+A line is reported when it holds a French word, at least three French
+signals, or two of them and no English function word. French words are
+words that only exist in French and lowercase words with French accents,
+other than English loanwords such as "café". French signals are short French
+words that also appear in English text or code, such as "le", "des" or
+"pour", lowercase words with French endings ("-eux", "-ique"), elisions such
+as "l'" or "qu'", accented letters alone ("à") and capitalized accented
+words, which may be names (Genève, Réunion); each counts once.
 
-Words in capitals (codes and acronyms such as DE or AUX), identifiers with
-digits or underscores and URLs are ignored. In a hyphenated compound or
-alone in quotes, short French words are codes or prefixes ("de-DE", "au",
-de-energize) and count for nothing. A line can opt out with a
-`ci-allow: french` comment, and a repository can allow words such as brand
-names, hyphenated or not.
+A capital says nothing at the start of a sentence, a line or a quoted
+string; elsewhere, a capitalized French word is a name (Notre Dame) and only
+counts as a signal. Words in capitals are codes, acronyms or constants (DE,
+AUX): a French word in capitals is a signal and other words count for
+nothing. Identifiers (words with inner capitals, digits or underscores) and
+URLs are ignored. In a hyphenated compound or alone in quotes, short French
+words are codes or prefixes ("de-DE", "au", de-energize) and count for
+nothing. A line can opt out with a `ci-allow: french` comment, and a
+repository can allow words such as brand names, hyphenated or not.
+
+Translation files are skipped: files in translation folders that hold data
+or are named after their language, gettext catalogs, and documents next to
+their English original (README.fr.md, docs/fr/ next to docs/en/).
 
 The same rule applies to the pull request title and body and to the messages
 of the commits introduced by the event, without the trailers that name
@@ -29,7 +37,7 @@ import os
 import re
 import sys
 import unicodedata
-from collections.abc import Iterable, Iterator
+from collections.abc import Container, Iterable, Iterator
 from pathlib import Path
 from typing import Literal
 
@@ -69,7 +77,9 @@ LANGUAGE_CODES = frozenset(
     """.split()
 )
 # Folders that hold translations, and the data and documentation files that
-# count as translations in them: code that loads translations is checked.
+# count as translations in them. Code there only counts when it is named after
+# its language or in its folder (locales/fr.js, locales/fr/common.js): code
+# that loads translations is checked.
 TRANSLATION_FOLDERS = frozenset({"translations", "i18n", "locale", "locales", "lang", "languages"})
 TRANSLATION_EXTENSIONS = frozenset(
     "arb ftl json md po pot properties rst strings txt xlf xliff yaml yml".split()
@@ -82,9 +92,9 @@ _LOCALIZED_DOC = re.compile(r"(?:.+\.|(?i:readme)[-_])(?P<tag>[^.]+)")
 
 # Words that are French and not English, written without accents as people
 # often do. Words shared with English, even rare or British ones (correction,
-# modifier, nouveau, pendant, salon, utilise), or with brand names in other
-# languages (Bonjour, Energie) stay out. Plurals and feminine past
-# participles (ajoutee) count.
+# hors, modifier, nouveau, pendant, salon, tache, utilise), or with brand
+# names in other languages (Bonjour, Energie) stay out. Plurals and feminine
+# past participles (ajoutee) count.
 STRONG_WORDS = frozenset(
     """
     actuel actuelle actuellement affichage afficher afin ainsi ajout ajoute
@@ -106,7 +116,7 @@ STRONG_WORDS = frozenset(
     etat etes etre evenement evite eviter explique expliquer exterieur faire
     fais fait faudrait faut faute fenetre ferme fermer fermeture fichier
     fonction fonctionnalite fonctionne fonctionnement gere gerer gestion
-    heure horaire horloge hors humidite identifiant identite incorrecte
+    heure horaire horloge humidite identifiant identite incorrecte
     indique indiquer indisponible injoignable interieur interrupteur
     intervalle inutile inutilise j'ai jamais jeton joindre jour journalier
     laquelle lequel ligne lors lorsque lumiere luminosite maintenant maison
@@ -122,7 +132,7 @@ STRONG_WORDS = frozenset(
     remplacer renomme renommer renvoie repondre reponse requete reseau
     retourne reveil rien roulant sauf sauvegarde sauvegarder seconde selon
     semaine serait seront serveur seuil seulement simplifie sinon soir soit
-    sommes sont souvent suis suivant suivante supprime supprimer tache
+    sommes sont souvent suis suivant suivante supprime supprimer
     telecommande toujours tous toute toutes traduction traduire traduit tres
     trois trop trouve trouver utilisateur utiliser valeur valide valider
     veille verifie veut voici voiture volet votre vous vrai
@@ -147,8 +157,8 @@ ENGLISH_ENDINGS = tuple(
 # that one of them alone proves nothing.
 WEAK_WORDS = frozenset(
     """
-    au aux ce ces cet chez chose connexion de des dont du elle est et il ils
-    je la le les leur leurs lui mais mes ont ou par pas pour que qui sans
+    au aux ce ces cet chez chose connexion de des dont du elle est et hors il
+    ils je la le les leur leurs lui mais mes ont ou par pas pour que qui sans
     ses si sous sur un une verifier vos
     """.split()
 )
@@ -174,9 +184,17 @@ _URL = re.compile(r"\b[a-z][a-z0-9+.-]*://\S*", re.IGNORECASE)
 _ELISION = re.compile(r"(?:jusqu|lorsqu|puisqu|qu|[cdjlmnst])'(?=\w)", re.IGNORECASE)
 _CONTRACTION = re.compile(r"(?:'s|n't|'re|'ll|'ve|'d|'m)$", re.IGNORECASE)
 _QUOTES = "\"'`"
-_FRENCH_ACCENTS = frozenset("àâæçéèêëîïôœùûüÿ")
-# The trailers that end a commit message, and those that name people.
-_TRAILER = re.compile(r"[A-Za-z0-9]+(?:-[A-Za-z0-9]+)*:\s")
+# Letters with French accents; ü is German or Turkish (Zürich, Türkiye).
+_FRENCH_ACCENTS = frozenset("àâæçéèêëîïôœùûÿ")
+# Punctuation that, before a word, shows that the word does not start a
+# sentence.
+_MID_SENTENCE = frozenset(",;")
+# The lines of the trailer block that ends a commit message: trailers, with
+# the breaking change footer of Conventional Commits, and the line that
+# `git cherry-pick -x` adds. Then the trailers that name people.
+_TRAILER = re.compile(
+    r"(?:[A-Za-z0-9]+(?:-[A-Za-z0-9]+)*|BREAKING CHANGE):\s|\(cherry picked from commit "
+)
 _PERSON_TRAILER = re.compile(r"(?:[A-Za-z0-9-]+-by|cc):", re.IGNORECASE)
 
 Kind = Literal["strong", "signal", "weak", "english"]
@@ -219,23 +237,33 @@ def _has_french_ending(word: str) -> bool:
     )
 
 
-def _word_kind(word: str, allowed: frozenset[str]) -> Kind | None:
-    """Return what a word says about the language of its line, if anything."""
+def _word_kind(word: str, allowed: frozenset[str], initial: bool) -> Kind | None:
+    """Return what a word says about the language of its line, if anything.
+
+    initial tells whether the word starts a sentence, where a capital says
+    nothing about it.
+    """
     lower = word.lower()
     if (
         "_" in word
         or any(char.isdigit() for char in word)
-        or (len(word) > 1 and word.isupper())
         or lower in allowed
         or lower in ENGLISH_LOANWORDS
     ):
         return None
     bare = _strip_accents(lower)
+    if len(word) > 1 and word.isupper():
+        # Codes, acronyms and constants (DE, AUX, SECONDE): only several
+        # French words make text in capitals French.
+        return "signal" if _is_strong(bare) else None
+    if not word[1:].islower() and len(word) > 1:
+        return None  # An identifier, such as ConnectEx or iOS.
     if _is_strong(bare):
-        return "strong"
+        return "strong" if initial or word.islower() else "signal"
     if any(char in _FRENCH_ACCENTS for char in lower):
-        # Capitalized, an accented word that is not French is a name (Zürich).
-        return None if word[0].isupper() else "signal"
+        # An accented letter alone (à la carte) or a capitalized word that may
+        # be a name (Genève) is only a signal.
+        return "strong" if len(word) > 1 and word.islower() else "signal"
     if word.islower() and _has_french_ending(bare):
         return "signal"
     if lower in WEAK_WORDS:
@@ -243,7 +271,7 @@ def _word_kind(word: str, allowed: frozenset[str]) -> Kind | None:
     return "english" if lower in ENGLISH_WORDS else None
 
 
-def _part_kinds(part: str, allowed: frozenset[str]) -> Iterator[tuple[Kind, str]]:
+def _part_kinds(part: str, allowed: frozenset[str], initial: bool) -> Iterator[tuple[Kind, str]]:
     """Yield what a word, with its elision or English contraction, says, and the word."""
     lower = part.lower()
     if "'" in part and not part.isupper() and _strip_accents(lower) in STRONG_WORDS:
@@ -260,7 +288,7 @@ def _part_kinds(part: str, allowed: frozenset[str]) -> Iterator[tuple[Kind, str]
     if contraction := _CONTRACTION.search(part):
         part = part[: contraction.start()]
         yield "english", contraction.group().lower()
-    if part and (kind := _word_kind(part, allowed)):
+    if part and (kind := _word_kind(part, allowed, initial)):
         yield kind, part.lower()
 
 
@@ -269,15 +297,28 @@ def _is_quoted(text: str, start: int, end: int) -> bool:
     return start > 0 and end < len(text) and text[start - 1] == text[end] and text[end] in _QUOTES
 
 
+def _starts_sentence(text: str, start: int) -> bool:
+    """Return whether the word at start begins a sentence, a line or a quoted string.
+
+    Any punctuation but a comma or a semicolon may end a sentence or open a
+    string, so only a word, a number or one of these before the word shows
+    that it does not.
+    """
+    index = start - 1
+    while index >= 0 and text[index].isspace():
+        index -= 1
+    return index < 0 or not (text[index].isalnum() or text[index] in _MID_SENTENCE)
+
+
 def french_words(text: str, allowed: frozenset[str] = frozenset()) -> tuple[int, int, int]:
     """Return the number of French words, other French signals and English function words.
 
-    Identifiers (tokens with digits or underscores, such as the keys of a
-    French API) are not words of the text and are ignored, and so are the
-    words a repository allows, with their English possessive. In a
-    hyphenated compound, which is often a slug or a code, French words only
-    count as signals. Each signal counts once, so that code such as `le=le`
-    is not a sentence.
+    Identifiers (tokens with inner capitals, digits or underscores, such as
+    the keys of a French API) are not words of the text and are ignored, and
+    so are the words a repository allows, with their English possessive. In
+    a hyphenated compound, which is often a slug or a code, French words
+    only count as signals. Each signal counts once, so that code such as
+    `le=le` is not a sentence.
     """
     strong = english = 0
     signals: set[str] = set()
@@ -289,8 +330,9 @@ def french_words(text: str, allowed: frozenset[str] = frozenset()) -> tuple[int,
         parts = token.split("-")
         compound = len(parts) > 1
         codes = compound or _is_quoted(text, match.start(), match.end())
-        for part in parts:
-            for kind, word in _part_kinds(part, allowed):
+        initial = _starts_sentence(text, match.start())
+        for index, part in enumerate(parts):
+            for kind, word in _part_kinds(part, allowed, initial and index == 0):
                 if kind == "strong" and not compound:
                     strong += 1
                 elif kind in ("strong", "signal") or (kind == "weak" and not codes):
@@ -314,37 +356,68 @@ def _language(tag: str) -> str | None:
     return None
 
 
-def is_translation(path: str) -> bool:
+def _originals(path: str) -> Iterator[str]:
+    """Yield the paths of the English documents that a path would translate.
+
+    README.fr.md and README_fr.md translate README.md (or README.en.md and
+    README_en.md), and docs/fr/setup.md translates docs/en/setup.md. A page
+    at the root of docs/ proves nothing: next to docs/setup.md,
+    docs/os/setup.md is more likely about Home Assistant OS than in Ossetian.
+    """
+    folder, slash, name = path.rpartition("/")
+    stem, _, extension = name.rpartition(".")
+    localized = _LOCALIZED_DOC.fullmatch(stem)
+    if (
+        localized
+        and extension.lower() in DOC_EXTENSIONS
+        and _language(localized["tag"]) not in (None, "en")
+    ):
+        original = stem[: localized.start("tag") - 1]
+        separator = stem[localized.start("tag") - 1]
+        yield f"{folder}{slash}{original}.{extension}"
+        yield f"{folder}{slash}{original}{separator}en.{extension}"
+    parts = path.split("/")
+    for index in range(len(parts) - 2):
+        if parts[index] == "docs" and _language(parts[index + 1]) not in (None, "en"):
+            yield "/".join([*parts[: index + 1], "en", *parts[index + 2 :]])
+
+
+def is_translation(path: str, files: Container[str]) -> bool:
     """Return whether a path holds a translation into a language other than English.
 
-    Translations are documents named after their language (README.fr.md,
-    README_fr.md), data files in a translation folder (translations/fr.json,
-    locales/fr/messages.json), documents under docs/<language>/, and
-    gettext catalogs.
+    Translations are files in a translation folder that hold data or
+    documentation or are named after their language (translations/fr.json,
+    locales/fr/messages.json, locales/fr.js), gettext catalogs, and documents
+    named after their language (README.fr.md, README_fr.md) or under
+    docs/<language>/ whose English original is among files. Language codes
+    are also common folder and file names (docs/os/, notes.to.md), and a
+    translation without an original would be the only version.
     """
     *folders, name = path.split("/")
     stem, dot, extension = name.rpartition(".")
     extension = extension.lower()
-    if not dot or extension not in TRANSLATION_EXTENSIONS:
+    if not dot:
         return False
-    localized = _LOCALIZED_DOC.fullmatch(stem)
-    if localized and extension in DOC_EXTENSIONS and (language := _language(localized["tag"])):
-        return language != "en"
     for index, folder in enumerate(folders):
-        below = [*folders[index + 1 :], stem]
-        if folder in TRANSLATION_FOLDERS or (
-            folder == "docs" and len(below) > 1 and _language(below[0])
-        ):
-            return "en" not in map(_language, below)
-    return extension == "po" and "en" not in map(_language, [*folders, stem])
+        if folder in TRANSLATION_FOLDERS:
+            languages = [_language(part) for part in [*folders[index + 1 :], stem]]
+            return "en" not in languages and (extension in TRANSLATION_EXTENSIONS or any(languages))
+    if extension == "po":
+        return "en" not in map(_language, [*folders, stem])
+    return extension in TRANSLATION_EXTENSIONS and any(
+        original in files for original in _originals(path)
+    )
 
 
 def _prose_lines(message: str) -> list[str]:
     """Return the lines of a commit message without the trailers that name people.
 
     GitHub writes Co-authored-by trailers itself when it squashes the
-    commits of several authors, and names are not prose. Other trailers,
-    such as BREAKING-CHANGE, are kept.
+    commits of several authors, and names are not prose. The trailers are
+    the last paragraph when all its lines are trailers, counting the
+    BREAKING CHANGE footer and the line of `git cherry-pick -x` as
+    Conventional Commits and git do. Other trailers, such as
+    BREAKING-CHANGE, are kept.
     """
     lines = message.splitlines()
     blank = max((index for index, line in enumerate(lines) if not line.strip()), default=None)
@@ -375,7 +448,9 @@ def check_files(
 ) -> None:
     """Report lines of non-translation files that look French."""
     denylist = denylist or Denylist("")
-    selected = [path for path in paths if not is_translation(display_path(path))]
+    texts = {path: display_path(path) for path in paths}
+    files = frozenset(texts.values())
+    selected = [path for path, text in texts.items() if not is_translation(text, files)]
     for path, number, line in iter_lines(root, selected):
         if looks_french(line, allowed) and not allowed_by_pragma(line, CATEGORY):
             shown, annotated = location(denylist, display_path(path))
