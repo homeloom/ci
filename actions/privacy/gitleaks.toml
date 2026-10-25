@@ -13,14 +13,23 @@
 # fonts, documents, and any path containing "gitleaks.toml"), its regexes
 # (values such as "true", "${VAR}" or "${{ secrets.NAME }}") and its
 # stopwords. A pull request chooses its own paths and values, so a global
-# allowlist would let it hide a secret. The upstream header comment is
-# replaced by this one. The rules and their own allowlists are unchanged,
-# except for a gitleaks:allow comment on the rule whose pattern is a
-# literal token prefix, which would otherwise match this file when the
-# shared CI scans its own history.
+# allowlist would let it hide a secret. For the same reason, the
+# allowlists of the github-app-token and github-pat rules, which skipped
+# any file at a path ending with @octokit/auth-token/README.md, are removed
+# too. The upstream header comment is replaced by this one.
 #
-# To update gitleaks, take config/gitleaks.toml at the new tag, remove its
-# global allowlist again, and update the version and digest above.
+# Added: an allowlist of the generic-api-key rule for package versions in
+# JavaScript lock files, such as "@material/tokens":
+# "14.0.0-canary.53b3cad2f.0". It applies only when both the path and the
+# shape of the value match, and the rules for known token formats still
+# apply to lock files.
+#
+# The other rules and allowlists are unchanged, except for a gitleaks:allow
+# comment on the rule whose pattern is a literal token prefix, which would
+# otherwise match this file when the shared CI scans its own history.
+#
+# To update gitleaks, take config/gitleaks.toml at the new tag, make the
+# same changes again, and update the version and digest above.
 
 title = "gitleaks config"
 
@@ -2087,6 +2096,16 @@ regexes = [
     '''LIC_FILES_CHKSUM[^=]*=\s*"[^"]+''',
     '''SRC[^=]*=\s*"[a-zA-Z0-9]+''',
 ]
+# Added for the privacy action: see the header.
+[[rules.allowlists]]
+description = "Package versions in JavaScript lock files"
+condition = "AND"
+paths = [
+    '''(?:^|/)(?:package-lock\.json|npm-shrinkwrap\.json|pnpm-lock\.yaml|bun\.lock)$''',
+]
+regexes = [
+    '''^\d+\.\d+\.\d+(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$''',
+]
 
 [[rules]]
 id = "github-app-token"
@@ -2096,10 +2115,6 @@ entropy = 3
 keywords = [
     "ghu_",
     "ghs_",
-]
-[[rules.allowlists]]
-paths = [
-    '''(?:^|/)@octokit/auth-token/README\.md$''',
 ]
 
 [[rules]]
@@ -2122,10 +2137,6 @@ description = "Uncovered a GitHub Personal Access Token, potentially leading to 
 regex = '''ghp_[0-9a-zA-Z]{36}'''
 entropy = 3
 keywords = ["ghp_"]
-[[rules.allowlists]]
-paths = [
-    '''(?:^|/)@octokit/auth-token/README\.md$''',
-]
 
 [[rules]]
 id = "github-refresh-token"

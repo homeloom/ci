@@ -15,7 +15,7 @@ from pathlib import Path
 import pytest
 
 from ci_checks import secrets
-from ci_checks._common import Reporter
+from ci_checks._common import EMPTY_SHA, Reporter
 from ci_checks.denylist import Denylist
 from helpers import EventWriter, Repo, pr_event
 
@@ -29,11 +29,17 @@ needs_gitleaks = pytest.mark.skipif(
 # file holds none.
 TOKEN = "ghp_" + "Bluefinch0Example1Token2Value3Abcd45"
 OTHER_TOKEN = "ghp_" + "Greyfinch9Sample8Token7Value6Wxyz543"
+APP_TOKEN = "ghs_" + "Bluefinch0Example1App2Token3Value456"
+# An npm canary version, which looks like a generic key next to a package
+# name, and a random value; split too, since the shared CI scans this file.
+CANARY = "14.0.0-canary" + ".53b3cad2f.0"
+RANDOM_VALUE = "Zx81kQp0Lm2Vb7" + "Nc4Rt6Yw9Hs3Jd5"
 Capture = pytest.CaptureFixture[str]
 # A gitleaks stand-in that records how it was called and answers from
-# FAKE_GITLEAKS: per command ("git" or "dir"), the log, the report (null to
-# write none, with {source} in a path standing for the scanned directory)
-# and the exit code.
+# FAKE_GITLEAKS: per command ("git" or "dir"), the log (by default, for
+# "dir", the size of the scanned files), the report (null to write none,
+# with {source} in a path standing for the scanned directory) and the exit
+# code.
 FAKE_GITLEAKS = """\
 import json, os, sys
 from pathlib import Path
@@ -43,7 +49,8 @@ call = {"args": args, "cwd": os.getcwd(), "cwd_empty": not os.listdir(),
 with Path(os.environ["FAKE_GITLEAKS_CALLS"]).open("a") as calls:
     calls.write(json.dumps(call) + "\\n")
 answer = json.loads(os.environ["FAKE_GITLEAKS"])[args[0]]
-print(answer.get("log", ""), file=sys.stderr)
+size = sum(path.stat().st_size for path in Path(args[1]).rglob("*") if path.is_file())
+print(answer.get("log", f"10:00PM INF scanned ~{size} bytes"), file=sys.stderr)
 report = answer.get("report", [])
 if report is not None:
     report = [dict(item, File=item["File"].replace("{source}", args[1])) for item in report]
@@ -118,43 +125,49 @@ def test_parse_ignore() -> None:
     assert malformed == [5, 6, 7]
 
 
-def test_history_files_follow_first_parents(repo: Repo) -> None:
+def test_history_changes(repo: Repo) -> None:
+    moved = "".join(f"line {number}\n" for number in range(10))
     repo.write("a.txt", "a\n")
     repo.write("gone.txt", "x\n")
+    repo.write("old-name.txt", moved)
+    repo.write("same-name.txt", moved)
     (repo.root / "link").symlink_to("a.txt")
     first = repo.commit()
     repo.git("checkout", "--quiet", "-b", "feature")
     repo.write("b.txt", "b\n")
     repo.git("rm", "--quiet", "gone.txt")
+    repo.git("mv", "old-name.txt", "new-name.txt")
+    repo.write("new-name.txt", moved + "edited\n")
+    repo.git("mv", "same-name.txt", "renamed.txt")
     feature = repo.commit()
     repo.git("checkout", "--quiet", "main")
-    repo.write("c.txt", "c\n")
-    repo.write("copy.txt", "a\n")
+    repo.write("a.txt", "a\nmore\n")
     main = repo.commit()
     repo.git("merge", "--quiet", "--no-ff", "--no-commit", "feature")
     repo.write("added-by-merge.txt", "m\n")
     merge = repo.commit("Merge branch 'feature'")
 
-    files = secrets.history_files(repo.root, merge)
-    named = [(sha, path) for sha, path, _ in files]
-    blob = repo.git("rev-parse", "HEAD:a.txt").strip()
-    # The merge counts with what its first parent lacks, but b.txt has the
-    # content that the feature commit wrote first. Deletions and symbolic
-    # links write no file content.
-    assert sorted(named) == sorted(
+    def blob(path: str, revision: str = "HEAD") -> str:
+        return repo.git("rev-parse", f"{revision}:{path}").strip()
+
+    empty, old_a = EMPTY_SHA, blob("a.txt", first)
+    # The merge counts with what its first parent lacks. A renamed file
+    # counts with what changed, so not at all when only its name did.
+    # Deletions and symbolic links write no file content.
+    assert sorted(secrets.history_changes(repo.root, merge)) == sorted(
         [
-            (first, "a.txt"),
-            (first, "gone.txt"),
-            (feature, "b.txt"),
-            (main, "c.txt"),
-            (main, "copy.txt"),
-            (merge, "added-by-merge.txt"),
+            (first, "a.txt", empty, old_a),
+            (first, "gone.txt", empty, blob("gone.txt", first)),
+            (first, "old-name.txt", empty, blob("old-name.txt", first)),
+            (first, "same-name.txt", empty, blob("same-name.txt", first)),
+            (feature, "b.txt", empty, blob("b.txt")),
+            (feature, "new-name.txt", blob("old-name.txt", first), blob("new-name.txt")),
+            (main, "a.txt", old_a, blob("a.txt")),
+            (merge, "b.txt", empty, blob("b.txt")),
+            (merge, "new-name.txt", blob("old-name.txt", first), blob("new-name.txt")),
+            (merge, "added-by-merge.txt", empty, blob("added-by-merge.txt")),
         ]
     )
-    assert named[:2] == [(first, "a.txt"), (first, "gone.txt")]
-    assert named[-1] == (merge, "added-by-merge.txt")
-    assert (first, "a.txt", blob) in files
-    assert (main, "copy.txt", blob) in files
 
 
 def test_unreadable_files(repo: Repo, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -165,33 +178,38 @@ def test_unreadable_files(repo: Repo, monkeypatch: pytest.MonkeyPatch) -> None:
     repo.write("end\\", "trailing\n")
     repo.write("binary.bin\\", b"\0\1\2token")
     repo.write("big.ps1", ("x" * 50).encode("utf-16"))
+    repo.write("converted.ps1", "one\ntwo\n")
+    repo.write("was-binary.ps1", b"\0one\n")
+    repo.write("shortened.ps1", "one\ntwo\n".encode("utf-16"))
     first = repo.commit()
     repo.write("utf16.ps1", ("token\r\nline two\r\n").encode("utf-16"))
+    repo.write("converted.ps1", "one\ntwo\nthree\n".encode("utf-16"))
+    repo.write("was-binary.ps1", "one\n".encode("utf-16"))
+    repo.write("shortened.ps1", "one\n".encode("utf-16"))
+    repo.write("end\\", "trailing\nmore\n")
+    repo.git("mv", "utf32.txt", "renamed.txt")
     second = repo.commit()
     monkeypatch.setattr(secrets, "MAX_SCAN_BYTES", 80)
 
-    assert secrets.unreadable_files(repo.root, second) == [
-        (first, "end\\", "trailing\n"),
-        (first, "utf16.ps1", "token\r\nline\r\n"),
-        (first, "utf32.txt", "wide\n"),
-        (second, "utf16.ps1", "token\r\nline two\r\n"),
-    ]
+    # Like a diff, a later version only holds the lines it adds, at their
+    # line numbers, and a renamed or shortened file nothing.
+    assert sorted(secrets.unreadable_files(repo.root, second)) == sorted(
+        [
+            (first, "end\\", "trailing\n"),
+            (first, "shortened.ps1", "one\ntwo\n"),
+            (first, "utf16.ps1", "token\r\nline\r\n"),
+            (first, "utf32.txt", "wide\n"),
+            (second, "converted.ps1", "\n\nthree\n"),
+            (second, "end\\", "\nmore\n"),
+            (second, "utf16.ps1", "\nline two\r\n"),
+            (second, "was-binary.ps1", "one\n"),
+        ]
+    )
 
 
-@pytest.mark.parametrize(
-    ("path", "safe"),
-    [
-        ("a/b.txt", "a/b.txt"),
-        (".github/x.yml", ".github/x.yml"),
-        ("end\\", "end\\"),
-        ("../x", "file"),
-        ("a/../../x", "file"),
-        ("/etc/x", "file"),
-        ("", "file"),
-    ],
-)
-def test_safe_path(path: str, safe: str) -> None:
-    assert secrets._safe_path(path) == safe
+def test_without_allow_marker() -> None:
+    assert secrets._without_allow_marker("a gitleaks:gitleaks:allowallow b") == "a  b"
+    assert secrets._without_allow_marker("Gitleaks:Allow") == "Gitleaks:Allow"
 
 
 def test_report(capsys: Capture) -> None:
@@ -330,6 +348,27 @@ def test_main_fails_closed(
     assert "no problem found" not in out
 
 
+@pytest.mark.parametrize(
+    "log", ["10:00PM INF scanned ~10 bytes (10 bytes) in 1ms", "10:00PM INF no leaks found"]
+)
+def test_main_fails_when_gitleaks_skips_texts(
+    repo: Repo,
+    fake_gitleaks: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    event: EventWriter,
+    capsys: Capture,
+    log: str,
+) -> None:
+    repo.write("README.md", "# Demo\n")
+    repo.commit("docs: add a readme")
+    event({})
+    fake_answers(monkeypatch, {"log": SCANNED}, {"log": log})
+    assert scan(repo, fake_gitleaks) == 1
+    out = output(capsys)
+    assert "::error::gitleaks skipped some of the commit messages" in out
+    assert "no problem found" not in out
+
+
 def test_gitleaks_errors_hide_denylisted_terms(
     fake_gitleaks: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -440,10 +479,11 @@ def test_main_maps_text_findings(
         monkeypatch,
         {"log": SCANNED},
         {
+            # Each text starts with a line feed, which gitleaks counts.
             "report": [
-                {"RuleID": "jwt", "StartLine": 2, "File": f"{{source}}/messages/{head}"},
-                {"RuleID": "jwt", "StartLine": 1, "File": "{source}/pull-request/title"},
-                {"RuleID": "jwt", "StartLine": 3, "File": "{source}/files/0/notes.ps1"},
+                {"RuleID": "jwt", "StartLine": 3, "File": f"{{source}}/messages/{head}"},
+                {"RuleID": "jwt", "StartLine": 2, "File": "{source}/pull-request/title"},
+                {"RuleID": "jwt", "StartLine": 4, "File": "{source}/files/0"},
             ]
         },
     )
@@ -643,6 +683,115 @@ def test_gitleaks_reads_files_git_calls_binary(
     out = output(capsys)
     for where in ("settings.env:1", "export.ps1:2", "nul.cfg:1", "end\\:1"):
         assert f"Commit {head[:12]}: {where}: possible secret (github-pat)." in out
+
+
+@needs_gitleaks
+def test_gitleaks_reads_texts_it_skips_in_a_directory(
+    repo: Repo, event: EventWriter, capsys: Capture
+) -> None:
+    # gitleaks skips a file whose name contains an archive extension (.br in
+    # .bridge, .tar, .zip) or whose content starts like a binary format.
+    repo.write("README.md", "# Demo\n")
+    base = repo.commit()
+    repo.write("lamp.bridge.ps1", ("header\r\n" + secret_line()).encode("utf-16"))
+    repo.write("backup.tar.ps1", secret_line().encode("utf-16"))
+    repo.write("dump.reg", ("%PDF-1.7\r\n" + secret_line()).encode("utf-16"))
+    repo.write("notes.zip\\", secret_line())
+    head = repo.commit(f"MZ notes\n\n{secret_line()}")
+    event(pr_event(base, head, body=f"%PDF-1.7\n{secret_line()}"))
+    assert scan(repo, None) == 1
+    out = output(capsys)
+    for where in (
+        "lamp.bridge.ps1:2",
+        "backup.tar.ps1:1",
+        "dump.reg:2",
+        "notes.zip\\:1",
+        "message line 3",
+    ):
+        assert f"Commit {head[:12]}: {where}: possible secret (github-pat)." in out
+    assert "Pull request body, line 2: possible secret (github-pat)." in out
+    assert "Secrets: 6 problem(s) found." in out
+
+
+@needs_gitleaks
+def test_gitleaks_allow_cannot_hide_texts(repo: Repo, event: EventWriter, capsys: Capture) -> None:
+    repo.write("README.md", "# Demo\n")
+    base = repo.commit()
+    marked = secret_line().replace("\n", " # gitleaks:allow\n")
+    repo.write("export.ps1", marked.encode("utf-16"))
+    head = repo.commit(f"fix: use the token\n\n{marked}")
+    event(pr_event(base, head, body=f"Set {marked}"))
+    assert scan(repo, None) == 1
+    out = output(capsys)
+    assert f"Commit {head[:12]}: export.ps1:1: possible secret (github-pat)." in out
+    assert f"Commit {head[:12]}: message line 3: possible secret (github-pat)." in out
+    assert "Pull request body, line 1: possible secret (github-pat)." in out
+    assert "Secrets: 3 problem(s) found." in out
+
+
+@needs_gitleaks
+def test_gitleaks_reports_wide_files_once(repo: Repo, event: EventWriter, capsys: Capture) -> None:
+    repo.write("export.ps1", ("header\r\n" + secret_line()).encode("utf-16"))
+    old = repo.commit()
+    base = repo.commit()
+    repo.write(
+        "export.ps1", ("edited\r\n" + secret_line() + secret_line(OTHER_TOKEN)).encode("utf-16")
+    )
+    edit = repo.commit()
+    (repo.root / "scripts").mkdir()
+    repo.git("mv", "export.ps1", "scripts/export.ps1")
+    head = repo.commit()
+    known = f"{old}:export.ps1:github-pat:2"
+    event(pr_event(base, head))
+    # Neither the edit of another line nor the rename reports the known
+    # false positive again; the line that the edit adds is reported.
+    assert scan(repo, None, "--ignore", known) == 1
+    out = output(capsys)
+    assert f"::warning::Known false positive ignored by secrets-ignore: {known}" in out
+    assert f"Commit {edit[:12]}: export.ps1:3: possible secret (github-pat)." in out
+    assert "Secrets: 1 problem(s) found." in out
+
+
+@needs_gitleaks
+def test_gitleaks_accepts_versions_in_lock_files_only(
+    repo: Repo, event: EventWriter, capsys: Capture
+) -> None:
+    version = f'"@bluefinch/tokens": "{CANARY}"'
+    repo.write(
+        "frontend/package-lock.json",
+        f'{{\n  "dependencies": {{\n    {version},\n    "api-token": "{RANDOM_VALUE}"\n  }}\n}}\n',
+    )
+    repo.write(
+        "pnpm-lock.yaml",
+        "snapshots:\n  '@bluefinch/card@1.0.0':\n    dependencies:\n"
+        f"      '@bluefinch/tokens': {CANARY}\n",
+    )
+    repo.write(
+        "bun.lock", f'{{"packages": {{"@bluefinch/card": [{{"dependencies": {{{version}}}}}]}}}}\n'
+    )
+    repo.write("src/versions.json", f"{{{version}}}\n")
+    head = repo.commit()
+    event({})
+    assert scan(repo, None) == 1
+    out = output(capsys)
+    for where in ("frontend/package-lock.json:4", "src/versions.json:1"):
+        assert f"Commit {head[:12]}: {where}: possible secret (generic-api-key)." in out
+    assert "Secrets: 2 problem(s) found." in out
+
+
+@needs_gitleaks
+def test_gitleaks_has_no_path_allowlist_for_github_tokens(
+    repo: Repo, event: EventWriter, capsys: Capture
+) -> None:
+    # The default configuration skips GitHub tokens in this file, at any depth.
+    path = "docs/@octokit/auth-token/README.md"
+    repo.write(path, secret_line() + secret_line(APP_TOKEN))
+    head = repo.commit()
+    event({})
+    assert scan(repo, None) == 1
+    out = output(capsys)
+    assert f"Commit {head[:12]}: {path}:1: possible secret (github-pat)." in out
+    assert f"Commit {head[:12]}: {path}:2: possible secret (github-app-token)." in out
 
 
 @needs_gitleaks

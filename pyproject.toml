@@ -54,7 +54,12 @@ addopts = [
 ]
 
 [tool.coverage.report]
-# Only the lines marked "# pragma: no cover - <reason>" are excluded, not the
-# other defaults of coverage.py; CI fails on a pragma without a reason.
-exclude_lines = ['#\s*(pragma|PRAGMA)[:\s]?\s*(no|NO)\s*(cover|COVER)']
+# As in ha-tests.yml, only these are excluded: "# pragma: no cover - <reason>"
+# (a pragma without a reason excludes nothing, and CI reports it), "if
+# TYPE_CHECKING:" blocks and "..." stub bodies. Whitespace is spaces and tabs.
+exclude_lines = [
+    '#[ \t]*(pragma|PRAGMA)[: \t]?[ \t]*(no|NO)[ \t]*(cover|COVER)[ \t]*[-:][ \t]*[A-Za-z0-9]',
+    '^[ \t]*if[ \t]+(typing\.)?TYPE_CHECKING[ \t]*:',
+    '^[ \t]*\.\.\.[ \t]*(#.*)?$',
+]
 precision = 2
