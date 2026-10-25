@@ -289,15 +289,17 @@ Limits:
 | Input | Default | Description |
 | --- | --- | --- |
 | `homeassistant-minimum` | `homeassistant` in `hacs.json` | Oldest supported Home Assistant version. |
-| `python-minimum` | `3.13` | Python used with the oldest version. |
+| `python-minimum` | `3.13` | Python used with the oldest version. Set it to `3.14` when the oldest version is Home Assistant 2026.3 or later, which requires Python 3.14.2 or later. |
 | `python-latest` | `3.14` | Python used with the latest version. |
 | `requirements` | `requirements_test.txt` | Test requirements, installed when the file exists. |
 | `coverage-source` | `custom_components` | Package or directory measured for coverage, as pytest imports or finds it (for example `custom_components`, `./custom_components`, or a package under `src/` with pytest `pythonpath = src`). |
 | `coverage-minimum` | `95` | Minimum total coverage in percent. Lowering it needs a written justification in the pull request. |
 
 The workflow picks the versions of `homeassistant` and
-`pytest-homeassistant-custom-component`, so the test requirements must not
-pin them. Runtime requirements from the manifests are installed too.
+`pytest-homeassistant-custom-component` (0.13 or later), so the test
+requirements must not pin them. Runtime requirements from the manifests are
+installed too. The job fails with a clear error when the oldest version
+requires another Python than `python-minimum`.
 
 Coverage ignores the coverage settings of the repository, including `--cov`
 options in the pytest configuration. Only lines marked
@@ -312,7 +314,8 @@ the job; every tracked Python file is checked.
 | `hacs-ignore` | | HACS checks to skip. |
 
 HACS validation only runs on public repositories, because HACS cannot read
-private ones.
+private ones. The visibility is read from the API, so scheduled runs, whose
+event carries no repository, get it right too.
 
 ### ha-app.yml
 

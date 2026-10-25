@@ -29,8 +29,17 @@ jobs:
       - name: Hassfest
         uses: home-assistant/actions/hassfest@cd6f3635a740c84d8a14f6121a90068b8ece6bf6 # master
 
+      # Scheduled runs carry no repository in their event, so the visibility
+      # is read from the API.
+      - name: Read visibility
+        id: visibility
+        if: ${{ !cancelled() }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: echo "private=$(gh api "repos/${GITHUB_REPOSITORY}" --jq .private)" >> "$GITHUB_OUTPUT"
+
       - name: HACS
-        if: ${{ !cancelled() && github.event.repository.private == false }}
+        if: ${{ !cancelled() && steps.visibility.outputs.private == 'false' }}
         uses: hacs/action@d556e736723344f83838d08488c983a15381059a # 22.5.0
         with:
           category: integration

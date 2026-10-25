@@ -1,7 +1,8 @@
-"""Run the coverage steps of ha-tests.yml on small integrations."""
+"""Run steps of ha-tests.yml: version selection, and coverage on small integrations."""
 
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 import sys
@@ -32,7 +33,12 @@ def step_script(name: str) -> str:
 
 
 def run_step(
-    repo: Repo, tmp_path: Path, name: str, source: str = "custom_components"
+    repo: Repo,
+    tmp_path: Path,
+    name: str,
+    source: str = "custom_components",
+    extra: dict[str, str] | None = None,
+    bin_dir: Path | None = None,
 ) -> subprocess.CompletedProcess[str]:
     # Without the variables of the pytest-cov run of this test suite, which
     # would measure the inner run too.
@@ -47,6 +53,9 @@ def run_step(
         "COVERAGE_SOURCE": source,
         "COVERAGE_MINIMUM": "95",
     }
+    env |= extra or {}
+    if bin_dir:
+        env["PATH"] = f"{bin_dir}{os.pathsep}{env['PATH']}"
     return subprocess.run(
         ["bash", "-e", "-o", "pipefail", "-c", step_script(name)],
         cwd=repo.root,
@@ -121,3 +130,63 @@ def test_pragma_with_reason_excludes_code(repo: Repo, tmp_path: Path) -> None:
     result = run_step(repo, tmp_path, "Run tests")
     assert result.returncode == 0, result.stdout + result.stderr
     assert run_step(repo, tmp_path, "Check coverage pragmas").returncode == 0
+
+
+def select(repo: Repo, tmp_path: Path, leg: str, requires: str) -> tuple[int, str, str]:
+    """Run the version selection step with a fake PyPI answer.
+
+    Return the exit status, the output and the step outputs.
+    """
+    fake = tmp_path / "bin"
+    fake.mkdir()
+    release = {
+        "info": {"requires_python": requires},
+        "urls": [{"upload_time_iso_8601": "2026-03-04T12:00:00.000000Z"}],
+    }
+    curl = fake / "curl"
+    curl.write_text(f"#!/bin/sh\ncat <<'EOF'\n{json.dumps(release)}\nEOF\n", encoding="utf-8")
+    curl.chmod(0o755)
+    outputs = tmp_path / "outputs"
+    result = run_step(
+        repo,
+        tmp_path,
+        "Select Home Assistant version",
+        bin_dir=fake,
+        extra={
+            "LEG": leg,
+            "MINIMUM": "2026.3.0",
+            "GITHUB_OUTPUT": str(outputs),
+            "PLUGIN": "pytest-homeassistant-custom-component>=0.13",
+        },
+    )
+    written = outputs.read_text(encoding="utf-8") if outputs.exists() else ""
+    return result.returncode, result.stdout + result.stderr, written
+
+
+def test_minimum_leg_selects_the_release_and_a_cutoff(repo: Repo, tmp_path: Path) -> None:
+    major, minor = sys.version_info[:2]
+    status, output, written = select(
+        repo, tmp_path, "minimum", f">={major}.{minor}.0,<{major}.{minor + 1},!={major}.0.1"
+    )
+    assert status == 0, output
+    assert "spec=homeassistant==2026.3.0\n" in written
+    assert "cutoff=2026-03-11T12:00:00Z\n" in written
+
+
+@pytest.mark.parametrize("bound", [">={major}.{next}", ">={major}.{minor}.99", "<{major}.{minor}"])
+def test_minimum_leg_fails_when_the_release_excludes_the_python(
+    repo: Repo, tmp_path: Path, bound: str
+) -> None:
+    major, minor = sys.version_info[:2]
+    requires = bound.format(major=major, minor=minor, next=minor + 1)
+    status, output, written = select(repo, tmp_path, "minimum", requires)
+    assert status == 1
+    assert f"::error::Home Assistant 2026.3.0 requires Python {requires}, and this leg" in output
+    assert "Set python-minimum" in output
+    assert "spec=" not in written
+
+
+def test_latest_leg_bounds_the_plugin(repo: Repo, tmp_path: Path) -> None:
+    status, output, written = select(repo, tmp_path, "latest", "")
+    assert status == 0, output
+    assert "spec=pytest-homeassistant-custom-component>=0.13\n" in written

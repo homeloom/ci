@@ -22,7 +22,7 @@ on:
         type: string
         default: ""
       python-minimum:
-        description: Python version used with the oldest Home Assistant version.
+        description: Python version used with the oldest Home Assistant version. Home Assistant 2026.3 and later need 3.14.
         type: string
         default: "3.13"
       python-latest:
@@ -43,6 +43,12 @@ on:
         default: 95
 
 permissions: {}
+
+env:
+  # Older releases pin pytest 6, which fails on current Python. With this
+  # bound, a minimum version that no release supports fails to resolve
+  # instead of falling back to one of them.
+  PLUGIN: pytest-homeassistant-custom-component>=0.13
 
 jobs:
   tests:
@@ -82,7 +88,7 @@ jobs:
           MINIMUM: ${{ inputs.homeassistant-minimum }}
         run: |
           if [[ "$LEG" == "latest" ]]; then
-            echo "spec=pytest-homeassistant-custom-component" >> "$GITHUB_OUTPUT"
+            echo "spec=${PLUGIN}" >> "$GITHUB_OUTPUT"
           else
             if [[ -z "$MINIMUM" ]]; then
               MINIMUM="$(jq -er '.homeassistant' hacs.json)" || {
@@ -90,12 +96,36 @@ jobs:
                 exit 1
               }
             fi
+            release="$(curl -fsS --retry 3 --connect-timeout 10 --max-time 60 \
+              "https://pypi.org/pypi/homeassistant/${MINIMUM}/json")"
+            # uv would only report that no solution exists, so a Python that
+            # the release excludes is reported here.
+            requires="$(jq -r '.info.requires_python // ""' <<< "$release")"
+            python - "$MINIMUM" "$requires" <<'PY'
+          import operator
+          import re
+          import sys
+
+          minimum, requires = sys.argv[1:]
+          compare = {">=": operator.ge, ">": operator.gt, "<=": operator.le, "<": operator.lt}
+          for clause in requires.split(","):
+              match = re.fullmatch(r"\s*(>=|>|<=|<)\s*(\d+(?:\.\d+){0,2})\s*", clause)
+              if not match:
+                  continue
+              wanted = tuple(map(int, match[2].split("."))) + (0,) * (2 - match[2].count("."))
+              if not compare[match[1]](sys.version_info[:3], wanted):
+                  python = ".".join(map(str, sys.version_info[:3]))
+                  print(
+                      f"::error::Home Assistant {minimum} requires Python {requires}, and this "
+                      f"leg runs Python {python}. Set python-minimum to a version that "
+                      "satisfies it (3.14 for Home Assistant 2026.3 and later)."
+                  )
+                  sys.exit(1)
+          PY
             # Old releases do not pin their transitive dependencies, and newer
             # ones break them. Resolve as of one week after the release, which
             # matches what an install of that release had.
-            uploaded="$(curl -fsS --retry 3 --connect-timeout 10 --max-time 60 \
-              "https://pypi.org/pypi/homeassistant/${MINIMUM}/json" \
-              | jq -er '.urls[0].upload_time_iso_8601')"
+            uploaded="$(jq -er '.urls[0].upload_time_iso_8601' <<< "$release")"
             echo "spec=homeassistant==${MINIMUM}" >> "$GITHUB_OUTPUT"
             echo "cutoff=$(date -u -d "${uploaded} + 7 days" +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
           fi
@@ -123,7 +153,7 @@ jobs:
           else
             : > "$runtime"
           fi
-          args=("$SPEC" pytest-homeassistant-custom-component --requirement "$runtime")
+          args=("$SPEC" "$PLUGIN" --requirement "$runtime")
           if [[ -f "$REQUIREMENTS" ]]; then
             args+=(--requirement "$REQUIREMENTS")
           fi
