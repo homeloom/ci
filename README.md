@@ -61,7 +61,8 @@ silently checking less.
 | `privacy-exclude` | | Globs skipped by the generic personal data patterns. |
 | `require-denylist` | `true` | Fail when no `PRIVACY_DENYLIST*` secret holds a term, including on fork pull requests. |
 | `english-exclude` | | Globs skipped by the language check. |
-| `english-allowed-words` | | Words the language check accepts, such as accented brand names. |
+| `english-allowed-words` | | Words the language check accepts, such as brand names with accents or made of French words (hyphenated ones included). |
+| `secrets-ignore` | | Fingerprints (`commit:path:rule:line`) of known gitleaks false positives already on the base branch, one per line; each is reported as a warning. |
 | `license` | `MIT` | SPDX identifier the LICENSE file must match. |
 | `license-requirements` | | Extra runtime requirements files whose licenses are checked. |
 | `license-allowed` | | SPDX identifiers that replace the default allowed list. |
@@ -108,9 +109,16 @@ The **Hygiene** job checks:
 
 - **Pull request title**: Conventional Commits, at most 100 characters.
 - **Secrets**: gitleaks over the whole history of the pull request head,
-  with the default rules. The action passes its own configuration and runs
-  outside the checkout, so a `.gitleaks.toml` or `.gitleaksignore` in the
-  repository has no effect.
+  with the default rules of gitleaks 8.30.1, minus their allowlists of paths
+  and values (lock files, `node_modules`, virtual environments, images and
+  the GitHub token rules' `@octokit/auth-token/README.md`). Package versions
+  in JavaScript lock files (`package-lock.json`, `npm-shrinkwrap.json`,
+  `pnpm-lock.yaml`, `bun.lock`) are accepted by the `generic-api-key` rule.
+  Commit messages, the pull request title and body, and the lines added to
+  UTF-16 or UTF-32 files and to paths ending with a backslash are scanned
+  too, and the scan fails when gitleaks skips any of them. The action passes
+  its own configuration and runs outside the checkout, so a `.gitleaks.toml`
+  or `.gitleaksignore` in the repository has no effect.
 - **Personal data** with generic patterns: private and link-local IP
   addresses, global IPv6 addresses, e-mail addresses that are not noreply,
   phone numbers, URLs of any scheme whose host is outside an allowlist or is
@@ -136,7 +144,26 @@ The **Hygiene** job checks:
   only its pointer is in the repository while its content is published
   unchecked. So does a tracked file missing from the checkout.
 - **English**: French text outside translation files, in files, new commit
-  messages and the pull request title and body.
+  messages and the pull request title and body. A line is French when it
+  holds a French-only word, including a lowercase word with French accents
+  (English loanwords such as café excepted), or enough short French words
+  that English also uses (le, des, pour). A capitalized accented word, a
+  French word in capitals and a capitalized French word inside a sentence
+  count less, because they are often names, constants or codes. Commit
+  trailers that name people are skipped. Translation files are skipped:
+  - files in `translations/`, `i18n/`, `locale/`, `locales/`, `lang/` and
+    `languages/` folders that hold data or documentation, or whose name or
+    folder is a language code (`locales/fr.js`, `locales/fr/common.js`);
+  - gettext catalogs;
+  - documents named after their language (`README.fr.md`, `README_fr.md`)
+    next to their English original (`README.md`);
+  - pages under `docs/<language>/` whose English version exists under
+    `docs/en/`.
+
+  Language codes are also common folder names (`docs/os/` for Home
+  Assistant OS), so a translation without its English original is checked.
+  Translations kept elsewhere, such as at the root of `docs/`, need
+  `english-exclude`.
 - **Workflows**: actionlint with shellcheck.
 
 The first push of a branch, a force push and a manual run check every commit
@@ -146,7 +173,37 @@ The **Licenses** job checks that the LICENSE file matches the expected
 license and that every runtime dependency (manifest `requirements` and
 extra requirements files, transitive dependencies included) has an allowed
 license. Installing packages may run their build code, so this job runs
-separately and never receives the denylist secret.
+separately and never receives the denylist secret. How a license is read:
+
+- `License-Expression` is used as written.
+- Otherwise the `License` field is read together with the license
+  classifiers. A classifier the field accounts for is left out: the same
+  license, a version of it (such as `BSD-3-Clause` for "BSD License" or
+  `LGPL-2.1-or-later` for the versionless LGPL classifier), or
+  "Other/Proprietary License", which Poetry adds to every license it has no
+  classifier for. Every other classifier is added with AND, because
+  classifiers cannot tell a choice from a combination.
+- If the field accounts for no classifier, the classifiers decide, unless
+  the field names Commons Clause, proprietary or non-commercial terms, or a
+  GNU license that no classifier names: it is then reported as written and
+  fails.
+- A one-line `License` field is read as a license name or expression.
+  Known names are translated (for example "3-Clause BSD License" becomes
+  `BSD-3-Clause`), and `and` and `or` in any case are operators. A one-line
+  field that cannot be translated is reported as written and fails.
+- A multi-line `License` field is read as a full license text. It is
+  recognized only from phrases of the MIT, BSD and Apache 2.0 texts, only
+  if it names no GNU license and no restriction, and only if its first line,
+  when that line names a license, names a known one. Any other text is
+  reported as unknown.
+- After `WITH`, only SPDX license exceptions (license list 3.29.0) are
+  accepted. `X-N-or-later` (or the deprecated `X-N+`) is allowed when
+  version N or a later version of X is on the allowed list.
+
+Manifest requirements must be PEP 508 requirements or the legacy
+`<url>#<requirement>` form that Home Assistant accepts from custom
+integrations (for example `git+https://example.com/lib.git#lib>=1`).
+Options, paths, archive names and line breaks fail the job.
 
 Findings report where something was found, never what, so logs do not
 repeat the data. When a file path contains a denylisted term, the matching
@@ -156,9 +213,10 @@ A line that is not personal data despite matching a pattern can opt out of
 one category with a comment such as `# ci-allow: private-ip`. The categories
 are `private-ip`, `public-ip`, `email`, `phone`, `url`, `home-path`, `mac`,
 `device-id`, `coordinates` and `french`. The denylist and gitleaks cannot be
-opted out of. gitleaks has its own `gitleaks:allow` comment; the privacy
-check warns about every added line that uses it, and reviewers must
-question it.
+opted out of. gitleaks has its own `gitleaks:allow` comment, which works
+only in files git can diff as text: the privacy check warns about every
+added line that uses it, reviewers must question it, and it has no effect
+in commit messages, the pull request text or UTF-16 and UTF-32 files.
 
 Exemptions, kept narrow on purpose:
 
@@ -186,6 +244,18 @@ Limits:
   (Latin-1) strings are only searched for the longer terms. PDF files are
   always read as binary files.
 - Files larger than 20 MB are skipped with a warning.
+- The gitleaks rules limited to some file names (PHP, Terraform, Kubernetes
+  YAML, `nuget.config`, PKCS#12) do not apply to UTF-16 or UTF-32 files.
+- The language check recognizes French only. A label of one capitalized
+  accented word (which may be a name) or a short subject of one such word
+  can pass, and a capitalized French word at the start of a value, such as
+  a brand name, is reported unless it is listed in `english-allowed-words`.
+- Classifiers cannot express a choice, so a dual-licensed package whose
+  `License` field does not state the choice is rejected and needs a reviewed
+  exception. Restrictions worded differently, or written inside a
+  multi-line license text of a package that also has classifiers, are not
+  detected. The license check does not replace reviewing the license of a
+  new dependency.
 
 ### python-lint.yml
 
@@ -201,12 +271,18 @@ Limits:
 | `python-minimum` | `3.13` | Python used with the oldest version. |
 | `python-latest` | `3.14` | Python used with the latest version. |
 | `requirements` | `requirements_test.txt` | Test requirements, installed when the file exists. |
-| `coverage-source` | `custom_components` | What coverage measures. |
+| `coverage-source` | `custom_components` | Package or directory measured for coverage, as pytest imports or finds it (for example `custom_components`, `./custom_components`, or a package under `src/` with pytest `pythonpath = src`). |
 | `coverage-minimum` | `95` | Minimum total coverage in percent. Lowering it needs a written justification in the pull request. |
 
 The workflow picks the versions of `homeassistant` and
 `pytest-homeassistant-custom-component`, so the test requirements must not
 pin them. Runtime requirements from the manifests are installed too.
+
+Coverage ignores the coverage settings of the repository, including `--cov`
+options in the pytest configuration. Only lines marked
+`# pragma: no cover - <reason>`, `if TYPE_CHECKING:` blocks and `...` stub
+bodies are excluded. A pragma without a reason excludes nothing and fails
+the job; every tracked Python file is checked.
 
 ### ha-integration.yml
 
@@ -292,6 +368,12 @@ published as pre-releases.
   (actionlint, gitleaks, Ruff, uv). Check their releases when releasing
   this repository; to update one, change its version and digest together,
   using the checksums published with the upstream release.
+- `actions/privacy/gitleaks.toml` is the upstream gitleaks configuration
+  with the changes its header lists; update it with gitleaks, as the header
+  explains.
+- `SPDX_EXCEPTIONS` in `src/ci_checks/licenses.py` copies the exceptions of
+  the SPDX license list 3.29.0. An exception added to SPDX later is rejected
+  until it is added there.
 - To release this repository, bump `version` in `pyproject.toml` and add the
   matching `CHANGELOG.md` section. Releases are tagged automatically once CI
   passes on `main`.

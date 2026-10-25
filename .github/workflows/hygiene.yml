@@ -35,6 +35,12 @@ on:
         description: Fail when no secret whose name starts with PRIVACY_DENYLIST holds a term.
         type: boolean
         default: true
+      secrets-ignore:
+        description: >-
+          Fingerprints (commit:path:rule:line) of known gitleaks false
+          positives already on the base branch, one per line.
+        type: string
+        default: ""
       english-exclude:
         description: Globs of files skipped by the language check.
         type: string
@@ -113,6 +119,7 @@ jobs:
           allowed-domains: ${{ inputs.allowed-domains }}
           exclude: ${{ inputs.privacy-exclude }}
           require-denylist: ${{ inputs.require-denylist }}
+          secrets-ignore: ${{ inputs.secrets-ignore }}
 
       - name: English
         if: ${{ !cancelled() }}

@@ -18,6 +18,17 @@ All notable changes to this project are documented here. The format follows
   metadata, the content of commits that later commits remove, and a
   denylist merged from every secret whose name starts with
   `PRIVACY_DENYLIST`.
+- Secret scan: the default gitleaks rules without their allowlists of paths
+  and values, over the whole history, the commit messages, the pull request
+  text and UTF-16 and UTF-32 files, with exact fingerprints for known false
+  positives.
+- Language check: French outside translation files, with translations
+  recognized next to their English original.
+- License check: `License-Expression`, or the `License` field read with the
+  license classifiers, for every runtime dependency.
+- Home Assistant tests: coverage measured with the workflow's own
+  configuration, at least 95 % by default, excluding only lines whose
+  `# pragma: no cover` gives a reason.
 - Composite actions for each check, and a tool installer that verifies
   SHA-256 digests.
 - Templates for new repositories: license, security policy, contribution
