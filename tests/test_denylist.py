@@ -286,26 +286,64 @@ def test_glued_terms_after_complete_escapes(text: str) -> None:
 @pytest.mark.parametrize(
     "text",
     [
-        # Entities that do not decode are text.
-        "Smith&Sons;Zorblequix",
+        # Entities that do not decode as written are text, whatever they
+        # would decode to in lower case.
+        "Quillmore&Sons;Zorblequix",
         "R&D;Zorblequix;2024",
+        "R&Deg;Zorblequix",
+        "Zorblequix&Ltd;",
+        "Zorblequix&Notes;",
         # Partial escapes that the next letters do not complete.
         "\\x1Zorblequix",
         "%2Zorblequix",
         "\\u12Zorblequix",
     ],
 )
-def test_glued_terms_after_text_that_looks_like_an_escape(text: str) -> None:
-    assert Denylist("Zorblequix").matches(text)
+@pytest.mark.parametrize("rest", ["", " caf\\u00e9"])
+def test_glued_terms_after_text_that_looks_like_an_escape(text: str, rest: str) -> None:
+    # With an escape elsewhere on the line, both forms of the text are
+    # checked for escapes next to the term.
+    assert Denylist("Zorblequix").matches(text + rest)
+
+
+@pytest.mark.parametrize(
+    ("text", "found"),
+    [
+        # A \u escape takes four digits, a \U escape eight. The term is
+        # found when its first letters cannot be the digits that are missing.
+        ("\\u123Bluefinch", False),
+        ("\\u12Bluefinch", True),
+        ("\\U1234567Bluefinch", False),
+        ("\\U12345Bluefinch", True),
+        ("\\U000000C9Bluefinch", False),
+        # A legacy entity that decodes in lower case as written.
+        ("Bluefinch&ltd;", True),
+        ("Bluefinch&eacute;", False),
+    ],
+)
+def test_escapes_cut_short_before_a_term(text: str, found: bool) -> None:
+    assert Denylist("Bluefinch").matches(text + " caf\\u00e9") is found
 
 
 def test_terms_next_to_an_escape_are_still_found() -> None:
     # The longest match ends before an escape, so the shorter terms at the
-    # same place are tried.
+    # same place are tried, longest first.
     denylist = Denylist("Bluefinch\nBluefinch Quillmore")
     assert denylist.matches("Bluefinch Quillmore&amp;amp;eacute;")
     denylist = Denylist("Zorblequix 5G\nZorblequix5G Guest")
     assert denylist.spans("ssid = Zorblequix5G Guest&amp;amp;eacute;") == [(1, 1)]
+    denylist = Denylist("Bluefinch\nBluefinch Quillmore\nBluefinch Quillmore Zorble")
+    assert denylist.spans("Bluefinch\nQuillmore Zorble&amp;amp;eacute;") == [(1, 2)]
+    # When no term at that place is clear of escapes, the terms inside the
+    # longest one are still found.
+    denylist = Denylist("Bluefinch Quillmore Zorble\nQuillmore")
+    assert denylist.matches("Bluefinch Quillmore Zorble&amp;amp;eacute;")
+
+
+def test_short_terms_stay_out_of_camel_case_names_next_to_escapes() -> None:
+    denylist = Denylist("Ren\nRen Quillmore")
+    assert not denylist.matches("getRenQuillmore&amp;amp;eacute;")
+    assert denylist.matches("getRenQuillmore")
 
 
 def test_numbers_in_binary_content() -> None:

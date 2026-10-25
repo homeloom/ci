@@ -203,17 +203,46 @@ def test_generic_findings_ignore(text: str) -> None:
     assert privacy.generic_findings(text, ALLOWED) == []
 
 
-@pytest.mark.parametrize("prefix", privacy.FICTION_PHONE_PREFIXES)
-def test_each_fiction_phone_range_is_exempt(monkeypatch: pytest.MonkeyPatch, prefix: str) -> None:
-    # A number of the range, as long as the numbers of its country.
-    digits = (prefix + "41279358")[: 12 if prefix.startswith("44") else 11]
-    text = f"call +{digits[:2]} {digits[2:]}"
-    assert privacy.generic_findings(text, ALLOWED) == []
-    others = tuple(
-        other for other in privacy.FICTION_PHONE_PREFIXES if not prefix.startswith(other)
-    )
-    monkeypatch.setattr(privacy, "FICTION_PHONE_PREFIXES", others)
-    assert "phone" in privacy.generic_findings(text, ALLOWED)
+# The telephone blocks that regulators reserve for fiction, as they publish
+# them: ARCEP for France, Ofcom for the United Kingdom.
+FICTION_BLOCKS = [
+    "+33 1 99 00",
+    "+33 2 61 91",
+    "+33 3 53 01",
+    "+33 4 65 71",
+    "+33 5 36 49",
+    "+33 6 39 98",
+    "+44 113 496 0",
+    "+44 115 496 0",
+    "+44 117 496 0",
+    "+44 118 496 0",
+    "+44 121 496 0",
+    "+44 131 496 0",
+    "+44 141 496 0",
+    "+44 151 496 0",
+    "+44 161 496 0",
+    "+44 191 498 0",
+    "+44 20 7946 0",
+    "+44 7700 900",
+]
+
+
+def test_fiction_phone_blocks_are_the_published_ones() -> None:
+    blocks = {block.replace(" ", "").removeprefix("+") for block in FICTION_BLOCKS}
+    assert set(privacy.FICTION_PHONE_PREFIXES) == blocks
+
+
+@pytest.mark.parametrize("block", FICTION_BLOCKS)
+def test_fiction_phone_blocks_are_exempt_and_nothing_next_to_them(block: str) -> None:
+    digits = block.replace(" ", "").removeprefix("+")
+    length = 12 if digits.startswith("44") else 11
+    for end in ("0000", "9999"):
+        number = (digits + end)[:length]
+        assert privacy.generic_findings(f"call +{number[:2]} {number[2:]}", ALLOWED) == []
+    # The first number of the next block, built here and written nowhere.
+    following = str(int(digits) + 1)
+    number = following + "0" * (length - len(following))
+    assert "phone" in privacy.generic_findings(f"call +{number[:2]} {number[2:]}", ALLOWED)
 
 
 def test_extra_allowed_domain() -> None:

@@ -185,27 +185,27 @@ PLACEHOLDER_HEX = {
     "aabbccddeeff0011",
 }
 HEX_WORDS = ("babe", "bead", "beef", "c0de", "cafe", "d00d", "dead", "deaf", "f00d", "face", "feed")
-# Telephone ranges reserved for fiction and documentation: France (ARCEP),
-# North America (555-0100 to 555-0199, after the area code) and the United
-# Kingdom (Ofcom).
+# Telephone blocks reserved for fiction and documentation: France (ARCEP, six
+# blocks of 10,000 numbers), North America (555-0100 to 555-0199, after the
+# area code) and the United Kingdom (Ofcom, 1,000 numbers in each block).
 FICTION_NORTH_AMERICA = ("55501",)
 FICTION_PHONE_PREFIXES = (
-    "33199",
-    "332619",
-    "333530",
-    "334657",
-    "335364",
-    "336399",
-    "44113496",
-    "44115496",
-    "44117496",
-    "44118496",
-    "44121496",
-    "44131496",
-    "44141496",
-    "44151496",
-    "44161496",
-    "44191498",
+    "3319900",
+    "3326191",
+    "3335301",
+    "3346571",
+    "3353649",
+    "3363998",
+    "441134960",
+    "441154960",
+    "441174960",
+    "441184960",
+    "441214960",
+    "441314960",
+    "441414960",
+    "441514960",
+    "441614960",
+    "441914980",
     "442079460",
     "447700900",
 )

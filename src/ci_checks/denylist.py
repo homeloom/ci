@@ -2,9 +2,9 @@
 
 Matching ignores case, accents and invisible characters, respects word
 boundaries, and lets the words of a term be separated by any punctuation,
-underscores or line breaks. Numbers are stricter, so that a term made of
-numbers does not match dates, times, versions or lists written in another
-shape. Text that writes characters as escapes (\\u, \\x and \\n
+underscores or line breaks. Numbers follow stricter rules, so that versions
+such as "v1.12.3.0" and lists such as "[12, 3, 0]" do not match the term
+"12 3 0". Text that writes characters as escapes (\\u, \\x and \\n
 escapes, percent-encoding or HTML entities) is also matched as it reads
 once decoded.
 """
@@ -60,11 +60,12 @@ _ESCAPES = re.compile(
 )
 # An escape right before or after a word in the text as written: "Marc\\u00e8le"
 # is one word, not the name "Marc", so such words are only matched decoded.
-# Before a word, an escape may also end with the first letters of the word,
-# as in "%2Bluefinch", which reads "+luefinch".
+# Before a word, an escape that has at least one digit may also end with the
+# first letters of the word, as in "%2Bluefinch", which reads "+luefinch".
 _ESCAPE_AFTER = re.compile(r"\\u[0-9a-f]{4}|\\x[0-9a-f]{2}|%[0-9a-f]{2}|&#?\w+;")
 _ESCAPE_BEFORE = re.compile(rf"(?:{_ESCAPE_AFTER.pattern}|\\u[0-9a-f]{{8}})\Z")
 _PARTIAL_ESCAPE_BEFORE = re.compile(r"(?:\\u(?P<unicode>[0-9a-f]{1,7})|\\x[0-9a-f]|%[0-9a-f])\Z")
+_ENTITY = re.compile(r"&#?\w+;")
 # A lower case letter followed by a capital, as in "getName".
 _CAMEL = re.compile(r"(?<=[a-z\xdf-\xf6\xf8-\xff])(?=[A-Z\xc0-\xd6\xd8-\xde])")
 # What may separate two words of a term, besides the separator the term
@@ -259,12 +260,15 @@ class Denylist:
                 letters[_term_pattern(words, separators, glued)] = (size, words[0][0])
                 self.longest_term = max(self.longest_term, len(words))
         self._pattern = _alternation((p, size, first) for p, (size, first) in letters.items())
-        # Each term on its own, longest first, for the places where the
-        # longest term found touches an escape.
-        self._singles = [
-            (re.compile(p), size >= MIN_BINARY_TERM)
-            for p, (size, _) in sorted(letters.items(), key=lambda item: item[1][0], reverse=True)
-        ]
+        # Each term on its own, longest first and by first character, for
+        # the places where the longest term found touches an escape. The
+        # second table only has the terms that camel case names may hold.
+        self._singles: dict[bool, dict[str, list[re.Pattern[str]]]] = {False: {}, True: {}}
+        for p, (size, first) in sorted(letters.items(), key=lambda item: item[1][0], reverse=True):
+            single = re.compile(p)
+            self._singles[False].setdefault(first, []).append(single)
+            if size >= MIN_BINARY_TERM:
+                self._singles[True].setdefault(first, []).append(single)
         # Random bytes spell short words by chance, so in binary content
         # shorter terms only count inside phrases (see matches_binary).
         self._long = _alternation(
@@ -316,29 +320,41 @@ class Denylist:
             views = [(self._pattern, False, normalize(source))]
             if self._long and _CAMEL.search(source):
                 views.append((self._long, True, normalize(_CAMEL.sub(" ", source))))
+            # Entities are only told apart by their case, which folding loses,
+            # so those that decode are taken from the text as written.
+            entities = {
+                normalize(entity)
+                for entity in _ENTITY.findall(source)
+                if html.unescape(entity) != entity
+            }
             for pattern, long_only, folded in views:
                 view += 1
-                singles = [single for single, long in self._singles if long or not long_only]
-                for match in self._search(pattern, singles, folded, guarded):
+                singles = self._singles[long_only]
+                for match in self._search(pattern, singles, folded, guarded, entities):
                     yield view, folded, match
 
     @staticmethod
     def _search(
-        pattern: re.Pattern[str], singles: list[re.Pattern[str]], folded: str, guarded: bool
+        pattern: re.Pattern[str],
+        singles: dict[str, list[re.Pattern[str]]],
+        folded: str,
+        guarded: bool,
+        entities: set[str],
     ) -> Iterator[re.Match[str]]:
         """Yield the terms of a text, skipping those next to an escape.
 
         Only the longest term is found at each place. When it touches an
-        escape, the other terms are tried at the same place, and the search
-        goes on right after its start, so that terms inside it are found.
+        escape, the other terms that start there are tried, longest first.
+        When none of them is clear of escapes, the search goes on right after
+        that place, so that the terms inside the longest one are found.
         """
         position = 0
         while match := pattern.search(folded, position):
-            if guarded and _next_to_escape(folded, match):
+            if guarded and _next_to_escape(folded, match, entities):
                 found = None
-                for single in singles:
+                for single in singles.get(folded[match.start()], ()):
                     other = single.match(folded, match.start())
-                    if other and not _next_to_escape(folded, other):
+                    if other and not _next_to_escape(folded, other, entities):
                         found = other
                         break
                 if found is None:
@@ -416,15 +432,16 @@ class Denylist:
         return {value for value in values if len(value) >= MIN_PHRASE_TERM}
 
 
-def _next_to_escape(folded: str, match: re.Match[str]) -> bool:
+def _next_to_escape(folded: str, match: re.Match[str], entities: set[str]) -> bool:
     """Return whether an escape that decodes touches a match.
 
-    An escape cut short before the match counts when the first letters of
-    the match are the hexadecimal digits it is missing.
+    Entities count when they are among those of the text that decode. An
+    escape cut short before the match, after at least one digit, counts when
+    the first letters of the match are the hexadecimal digits it is missing.
     """
     before = folded[max(0, match.start() - 40) : match.start()]
     for escape in (_ESCAPE_BEFORE.search(before), _ESCAPE_AFTER.match(folded, match.end())):
-        if escape and (escape[0][0] != "&" or html.unescape(escape[0]) != escape[0]):
+        if escape and (escape[0][0] != "&" or escape[0] in entities):
             return True
     partial = _PARTIAL_ESCAPE_BEFORE.search(before)
     if partial is None:

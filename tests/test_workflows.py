@@ -7,6 +7,7 @@ import os
 import subprocess
 import sys
 import textwrap
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -264,6 +265,7 @@ def test_minimum_leg_installs_the_bounded_plugin(repo: Repo, tmp_path: Path) -> 
     repo.write("custom_components/zorble/manifest.json", '{"requirements": ["zorblelib==1.0"]}')
     repo.write("requirements_test.txt", "pytest-zorble==2.0\n")
     (tmp_path / "runner").mkdir()
+    started = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
     result = run_step(
         repo,
         tmp_path,
@@ -290,4 +292,4 @@ def test_minimum_leg_installs_the_bounded_plugin(repo: Repo, tmp_path: Path) -> 
     # The integration's own requirements are resolved as of now.
     name, cutoff = install[install.index("--exclude-newer-package") + 1].split("=")
     assert name == "zorblelib"
-    assert cutoff > "2026-03-11T12:00:00Z"
+    assert cutoff >= started
