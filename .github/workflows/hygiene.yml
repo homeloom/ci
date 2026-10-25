@@ -18,9 +18,6 @@ name: Hygiene
 # step headers with every value masked but every name visible, so the
 # names of all the secrets the caller can see must stay neutral, and the
 # denylists are numbered (PRIVACY_DENYLIST_1, PRIVACY_DENYLIST_2...).
-#
-# Callers run this workflow on draft pull requests too: it takes seconds,
-# and personal data must be found as soon as it is pushed.
 
 on:
   workflow_call:

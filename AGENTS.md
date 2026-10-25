@@ -27,9 +27,11 @@ who changes them, people and AI coding agents alike. They come on top of
 
 ## Pull requests
 
-- Push a branch only together with its draft pull request. On drafts only the
-  quick hygiene checks run; mark the pull request ready only when it is
-  complete, so the full CI runs once.
+- Push a branch only together with its draft pull request. No CI job runs on
+  drafts, so run the checks locally before each push. Write the final title
+  and body, then mark the pull request ready only when it is complete, so
+  the full CI runs once: each push or edit of a ready pull request runs it
+  again. Group fixes into as few pushes as possible.
 - Never force push to hide personal data or a secret: the old commits stay
   reachable on GitHub. Report it to a maintainer instead.
 - Keep at most three pull requests waiting for review per repository, each

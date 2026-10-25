@@ -32,21 +32,22 @@ A typical integration CI calls four workflows and ends with a **Report** job
 that needs all of them. Branch protection requires Report only, so adding or
 removing a job never requires a settings change.
 
-- Draft pull requests only run the hygiene job, which takes seconds and
-  finds personal data as soon as it is pushed. Report then fails with
-  "Draft pull request: only the hygiene checks ran". A skipped required check
-  would count as passed, so Report always runs and only passes when every
-  job it needs succeeded.
-- Marking the pull request ready for review starts one full run.
+- Draft pull requests run no job at all, so that work in progress costs no
+  runner minutes. GitHub never merges a draft, so the skipped Report, which
+  branch protection counts as passed, lets nothing through.
+- Marking the pull request ready for review starts one full run. Report runs
+  after failed or cancelled jobs too, and only passes when every job it
+  needs succeeded.
 - Editing the title or body starts a new run, because the title becomes the
   squash commit message and both are checked for personal data.
 - Runs of the same pull request cancel each other. Runs on `main` never do,
   so that every commit is checked.
 
-Push a branch only together with its draft pull request: a branch without
-one is not checked. A force push does not remove anything from GitHub, where
-the old commits stay reachable; if personal data or a secret was pushed,
-tell a maintainer instead.
+Nothing is checked before the pull request is ready for review, so run the
+checks locally on a draft, and never push personal data or a secret: a force
+push does not remove anything from GitHub, where the old commits stay
+reachable. If personal data or a secret was pushed, tell a maintainer
+instead.
 
 The composite actions in `actions/` can also be used on their own. The
 privacy and English actions read the history, so they need a checkout with

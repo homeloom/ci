@@ -10,8 +10,12 @@ All notable changes to this project are documented here. The format follows
 
 ### Changed
 
+- The calling workflow templates run no job at all on draft pull requests,
+  so that work in progress costs no runner minutes. Report is skipped on
+  drafts too, and no longer fails there.
 - The contribution guide template and `AGENTS.md` ask for tests that do not
-  depend on the machine that runs them.
+  depend on the machine that runs them, and `AGENTS.md` asks for the final
+  pull request text before it leaves draft.
 - Denylist: a comma or a colon between a word and a number is accepted when
   it follows the word and comes before a space or a tab, as in an address
   (`Quillmore Lane, 12`), while `"step": 12`, `["step", 12]` and `step:`
