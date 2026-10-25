@@ -21,8 +21,11 @@ class Repo:
         self.git("init", "--quiet", "--initial-branch=main")
 
     def git(self, *args: str, env: dict[str, str] | None = None) -> str:
+        # Merges check the committer identity too, and runners have none.
+        # Options given later, as in commit(), take precedence.
+        identity = ["-c", "user.name=octocat", "-c", f"user.email={NOREPLY}"]
         return subprocess.run(
-            ["git", *args],
+            ["git", *identity, *args],
             cwd=self.root,
             check=True,
             capture_output=True,

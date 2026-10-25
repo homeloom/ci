@@ -18,6 +18,8 @@ WORKFLOWS = Path(__file__).resolve().parent.parent / ".github" / "workflows"
 WORKFLOW = WORKFLOWS / "ha-tests.yml"
 TESTED = "def double(value: int) -> int:\n    return value * 2\n"
 NBSP = "\u00a0"
+# Split so that the pragma check of this repository does not report this file.
+PRAGMA = "# pragma: no " + "cover"
 TEST = "from {package} import double\n\n\ndef test_double() -> None:\n    assert double(2) == 4\n"
 
 
@@ -114,11 +116,11 @@ def test_coverage_source_forms(repo: Repo, tmp_path: Path, layout: str) -> None:
 @pytest.mark.parametrize(
     ("pragma", "reported"),
     [
-        ("# pragma: no cover", True),
-        ("# pragma: no cover - ", True),
+        (PRAGMA, True),
+        (f"{PRAGMA} - ", True),
         # Non-breaking spaces, which the shell does not take for spaces.
         (f"#{NBSP}pragma:{NBSP}no{NBSP}cover", False),
-        (f"# pragma: no cover{NBSP}- unused", True),
+        (f"{PRAGMA}{NBSP}- unused", True),
     ],
 )
 def test_pragma_without_reason_excludes_nothing(
