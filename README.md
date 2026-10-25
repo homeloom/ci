@@ -222,8 +222,9 @@ path segments are shown as `[redacted]`.
 A line that is not personal data despite matching a pattern can opt out of
 one category with a comment such as `# ci-allow: private-ip`. The categories
 are `private-ip`, `public-ip`, `email`, `phone`, `url`, `home-path`, `mac`,
-`device-id`, `coordinates` and `french`. The denylist and gitleaks cannot be
-opted out of. gitleaks has its own `gitleaks:allow` comment, which works
+`device-id`, `coordinates` and `french`. The denylist cannot be opted out
+of, and a gitleaks finding only through `secrets-ignore` (see the
+exemptions below). gitleaks has its own `gitleaks:allow` comment, which works
 only in files git can diff as text: the privacy check warns about every
 added line that uses it, reviewers must question it, and it has no effect
 in commit messages, the pull request text or UTF-16 and UTF-32 files.
@@ -238,9 +239,19 @@ Exemptions, kept narrow on purpose:
   upstream release notes and carry service addresses in trailers. In a pull
   request this only applies when Dependabot opened it, since anyone can
   write a bot address into a commit. The denylist still applies.
+- `secrets-ignore` lists the fingerprints of known gitleaks false
+  positives, as a failing run prints them. Only commits already on the base
+  branch can be ignored, so a pull request cannot hide a secret it adds;
+  each ignored finding is reported as a warning. It exists for findings
+  that merged history already holds, since history cannot be rewritten: a
+  real secret there must be revoked first.
 - Fork pull requests do not receive secrets, so the denylist cannot run on
-  them: the check fails, and a maintainer pushes the branch to the
-  repository to run it.
+  them and the check fails. Pushing the branch to this repository would run
+  its workflows with every secret of the repository, so a maintainer first
+  reviews the whole diff: any change under `.github/`, to the `homeloom/ci`
+  pins or to a script that CI runs is removed or explicitly approved before
+  the push. The safer route is to cherry-pick only the reviewed changes
+  outside these paths onto a fresh branch of the repository.
 
 Limits:
 
@@ -334,7 +345,9 @@ published as pre-releases.
 - **Secrets**: each denylist secret (a name starting with `PRIVACY_DENYLIST`)
   exists as an organization Actions secret and as an organization Dependabot
   secret of the same name, both available to every repository that calls
-  `hygiene.yml`.
+  `hygiene.yml`. GitHub prints secret names in every job log, so their names
+  are neutral and numbered (`PRIVACY_DENYLIST_1`, `PRIVACY_DENYLIST_2`…) and
+  never say what a list holds.
 - **Dependabot**: allowed to read this private repository, so it can update
   the pins in other repositories.
 - **Rulesets**: `main` requires a pull request, squash merging and the
@@ -399,3 +412,7 @@ uv pip install --require-hashes --requirement requirements-dev.txt
 ## License
 
 [MIT](LICENSE)
+
+`actions/privacy/gitleaks.toml` is adapted from the configuration of
+[gitleaks](https://github.com/gitleaks/gitleaks), distributed under the MIT
+License; the file carries its copyright and permission notice.

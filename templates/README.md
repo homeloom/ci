@@ -32,7 +32,10 @@ After copying the files:
 3. Enable private vulnerability reporting (Settings, Security).
 4. Give the repository access to every organization secret whose name
    starts with `PRIVACY_DENYLIST`, both as Actions secrets and as Dependabot
-   secrets. The CI workflow passes them with `secrets: inherit`.
+   secrets. The CI workflow passes them with `secrets: inherit`. GitHub
+   prints secret names in every job log, so the names stay neutral and
+   numbered (`PRIVACY_DENYLIST_1`, `PRIVACY_DENYLIST_2`…) and never say what
+   a list holds.
 5. Once the first pull request is merged, run the CI workflow by hand
    (Actions, CI, Run workflow). A manual run checks every commit of the
    history as new; do it before the first release and before making the

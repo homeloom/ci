@@ -832,7 +832,9 @@ def test_main_missing_denylist(
     monkeypatch.delenv("PRIVACY_DENYLIST")
     event(pr_event(head, head, fork=True))
     assert run_main(repo, monkeypatch, None) == 1
-    assert "not available to pull requests from forks" in capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert "not available to pull requests from forks" in out
+    assert "reviews the whole diff: any change under .github/" in out
     assert run_main(repo, monkeypatch, None, "--require-denylist", "false") == 0
 
 

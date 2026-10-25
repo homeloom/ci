@@ -910,8 +910,12 @@ def check_denylist_sources(sources: list[str], pr: PullRequest | None, reporter:
             reporter.warning(f"{empty} of the {len(sources)} denylist secrets are empty.")
     elif pr is not None and pr.from_fork:
         reporter.error(
-            "The denylist secrets are not available to pull requests from forks. A "
-            "maintainer must push the branch to this repository so that the denylist runs."
+            "The denylist secrets are not available to pull requests from forks. Pushing "
+            "the branch to this repository runs its workflows with every secret, so a "
+            "maintainer first reviews the whole diff: any change under .github/, to the "
+            "homeloom/ci pins or to a script that CI runs must be removed or explicitly "
+            "approved. Safer: cherry-pick only the reviewed changes outside these paths "
+            "onto a fresh branch of this repository."
         )
     else:
         reporter.error(

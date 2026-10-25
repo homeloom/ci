@@ -15,7 +15,8 @@ name: Hygiene
 # that code keeps the PRIVACY_DENYLIST* values and drops the variable before
 # it starts any subprocess. No third party tool or action sees the secrets,
 # and the checks never print them. GitHub shows the secrets context in the
-# step headers with every value masked, names visible.
+# step headers with every value masked but every name visible, so secret
+# names must stay neutral.
 #
 # Callers run this workflow on draft pull requests too: it takes seconds,
 # and personal data must be found as soon as it is pushed.
