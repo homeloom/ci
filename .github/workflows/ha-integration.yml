@@ -36,7 +36,13 @@ jobs:
         if: ${{ !cancelled() }}
         env:
           GH_TOKEN: ${{ github.token }}
-        run: echo "private=$(gh api "repos/${GITHUB_REPOSITORY}" --jq .private)" >> "$GITHUB_OUTPUT"
+        run: |
+          private="$(gh api "repos/${GITHUB_REPOSITORY}" --jq .private)"
+          if [[ "$private" != true && "$private" != false ]]; then
+            echo "::error::Could not read the visibility of ${GITHUB_REPOSITORY}."
+            exit 1
+          fi
+          echo "private=${private}" >> "$GITHUB_OUTPUT"
 
       - name: HACS
         if: ${{ !cancelled() && steps.visibility.outputs.private == 'false' }}

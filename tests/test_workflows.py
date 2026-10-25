@@ -1,4 +1,4 @@
-"""Run steps of ha-tests.yml: version selection, and coverage on small integrations."""
+"""Run workflow steps: version selection, coverage on small integrations, HACS gate."""
 
 from __future__ import annotations
 
@@ -13,15 +13,16 @@ import pytest
 
 from helpers import Repo
 
-WORKFLOW = Path(__file__).resolve().parent.parent / ".github" / "workflows" / "ha-tests.yml"
+WORKFLOWS = Path(__file__).resolve().parent.parent / ".github" / "workflows"
+WORKFLOW = WORKFLOWS / "ha-tests.yml"
 TESTED = "def double(value: int) -> int:\n    return value * 2\n"
 NBSP = "\u00a0"
 TEST = "from {package} import double\n\n\ndef test_double() -> None:\n    assert double(2) == 4\n"
 
 
-def step_script(name: str) -> str:
-    """Return the run script of a step of the workflow."""
-    lines = WORKFLOW.read_text(encoding="utf-8").splitlines()
+def step_script(name: str, workflow: Path = WORKFLOW) -> str:
+    """Return the run script of a step of a workflow."""
+    lines = workflow.read_text(encoding="utf-8").splitlines()
     start = lines.index(f"      - name: {name}")
     run = lines.index("        run: |", start)
     body = []
@@ -30,6 +31,13 @@ def step_script(name: str) -> str:
             break
         body.append(line)
     return textwrap.dedent("\n".join(body))
+
+
+def workflow_env(name: str) -> str:
+    """Return a variable of the env section of the workflow."""
+    lines = WORKFLOW.read_text(encoding="utf-8").splitlines()
+    [value] = [line.split(":", 1)[1].strip() for line in lines if line.startswith(f"  {name}:")]
+    return value
 
 
 def run_step(
@@ -156,7 +164,7 @@ def select(repo: Repo, tmp_path: Path, leg: str, requires: str) -> tuple[int, st
             "LEG": leg,
             "MINIMUM": "2026.3.0",
             "GITHUB_OUTPUT": str(outputs),
-            "PLUGIN": "pytest-homeassistant-custom-component>=0.13",
+            "PLUGIN": workflow_env("PLUGIN"),
         },
     )
     written = outputs.read_text(encoding="utf-8") if outputs.exists() else ""
@@ -187,6 +195,48 @@ def test_minimum_leg_fails_when_the_release_excludes_the_python(
 
 
 def test_latest_leg_bounds_the_plugin(repo: Repo, tmp_path: Path) -> None:
+    assert workflow_env("PLUGIN") == "pytest-homeassistant-custom-component>=0.13"
     status, output, written = select(repo, tmp_path, "latest", "")
     assert status == 0, output
     assert "spec=pytest-homeassistant-custom-component>=0.13\n" in written
+
+
+@pytest.mark.parametrize(
+    ("answer", "status", "written"),
+    [
+        ("echo false", 0, "private=false\n"),
+        ("echo true", 0, "private=true\n"),
+        ("echo 'HTTP 403: Resource not accessible' >&2; exit 1", 1, ""),
+        ("echo null", 1, ""),
+    ],
+)
+def test_hacs_gate_reads_the_visibility(
+    tmp_path: Path, answer: str, status: int, written: str
+) -> None:
+    fake = tmp_path / "bin"
+    fake.mkdir()
+    gh = fake / "gh"
+    gh.write_text(f"#!/bin/sh\n{answer}\n", encoding="utf-8")
+    gh.chmod(0o755)
+    outputs = tmp_path / "outputs"
+    outputs.touch()
+    result = subprocess.run(
+        [
+            "bash",
+            "-e",
+            "-o",
+            "pipefail",
+            "-c",
+            step_script("Read visibility", WORKFLOWS / "ha-integration.yml"),
+        ],
+        env={
+            "PATH": f"{fake}{os.pathsep}{os.environ['PATH']}",
+            "GITHUB_REPOSITORY": "example/zorble",
+            "GITHUB_OUTPUT": str(outputs),
+        },
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == status, result.stdout + result.stderr
+    assert outputs.read_text(encoding="utf-8") == written

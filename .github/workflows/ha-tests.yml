@@ -45,9 +45,10 @@ on:
 permissions: {}
 
 env:
-  # Older releases pin pytest 6, which fails on current Python. With this
-  # bound, a minimum version that no release supports fails to resolve
-  # instead of falling back to one of them.
+  # Without a bound, a minimum version that no release supports makes uv
+  # fall back to a release from 2021, which fails on current Python. 0.13
+  # supports Home Assistant 2023.3 and later, so with this bound resolution
+  # fails instead.
   PLUGIN: pytest-homeassistant-custom-component>=0.13
 
 jobs:
@@ -87,6 +88,7 @@ jobs:
           LEG: ${{ matrix.name }}
           MINIMUM: ${{ inputs.homeassistant-minimum }}
         run: |
+          : "${PLUGIN:?}"
           if [[ "$LEG" == "latest" ]]; then
             echo "spec=${PLUGIN}" >> "$GITHUB_OUTPUT"
           else

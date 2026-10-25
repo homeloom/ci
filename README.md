@@ -92,16 +92,18 @@ hyphens, respects word boundaries and accepts any punctuation, underscore,
 line break or nothing at all between the words of a term, so `First Last`
 also matches `first_last`, `First-Last`, `FirstLast` and a `First` that ends
 one line followed by a `Last` that starts the next. A camel case term such
-as `FirstLast` matches the same spellings. Terms of five letters or more
-also match as a part of a camel case name, such as `getFirstLast`, and next
-to digits, such as `FirstLast2`, unless they are spelled only with
+as `FirstLast` matches the same spellings. Terms of five letters and digits
+or more also match as a part of a camel case name, such as `getFirstLast`,
+and next to digits, such as `FirstLast2`, unless they are spelled only with
 hexadecimal digits. Numbers are stricter, so that dates, times and versions
 do not match: a number never touches another digit or a dot followed by a
 digit, two numbers are separated by exactly one space, dot, dash or
-underscore, and a word and a number by anything but a comma or a colon. So
+underscore, a word and the number after it by anything but a comma or a
+colon, and a number and the word after it by anything but a colon. So
 `12.3.0` matches `12 3 0` and `12_3_0`, but not `2026-12-30`, `12:30`,
 `1230`, `[12, 3, 0]` or `v1.12.3.0`, and `step 12` does not match
-`"step": 12`. Text
+`"step": 12`. A term always matches as it is written, so `03/12/1985` and
+`12, rue Quillmore` match themselves. Text
 that writes characters as escapes (`\u00e9`, `\x41`, `\n`, `%20`, `&eacute;`)
 is also matched decoded. List only terms that never belong in a repository:
 not the GitHub usernames of maintainers, which appear in noreply addresses
@@ -223,8 +225,8 @@ A line that is not personal data despite matching a pattern can opt out of
 one category with a comment such as `# ci-allow: private-ip`. The categories
 are `private-ip`, `public-ip`, `email`, `phone`, `url`, `home-path`, `mac`,
 `device-id`, `coordinates` and `french`. The denylist cannot be opted out
-of, and a gitleaks finding only through `secrets-ignore` (see the
-exemptions below). gitleaks has its own `gitleaks:allow` comment, which works
+of. A gitleaks finding can be ignored through `secrets-ignore` (see the
+exemptions below) or gitleaks' own `gitleaks:allow` comment, which works
 only in files git can diff as text: the privacy check warns about every
 added line that uses it, reviewers must question it, and it has no effect
 in commit messages, the pull request text or UTF-16 and UTF-32 files.
@@ -296,8 +298,9 @@ Limits:
 | `coverage-minimum` | `95` | Minimum total coverage in percent. Lowering it needs a written justification in the pull request. |
 
 The workflow picks the versions of `homeassistant` and
-`pytest-homeassistant-custom-component` (0.13 or later), so the test
-requirements must not pin them. Runtime requirements from the manifests are
+`pytest-homeassistant-custom-component` (0.13 or later, so the oldest
+version is Home Assistant 2023.3 or later), so the test requirements must
+not pin them. Runtime requirements from the manifests are
 installed too. The job fails with a clear error when the oldest version
 requires another Python than `python-minimum`.
 

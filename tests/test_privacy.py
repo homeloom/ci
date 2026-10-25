@@ -52,7 +52,10 @@ def fiction_detected(monkeypatch: pytest.MonkeyPatch) -> None:
         ("prefix fd12:3456:789a::1", "private-ip"),
         ("link fe80::1c2b:3a4d:5e6f:7081%eth0", "private-ip"),
         ("snake host_10.0.0.7_backup", "private-ip"),
-        ("home 2a00:1111:2222:3333::1", "public-ip"),
+        # Documentation addresses are exempt, so public addresses come from
+        # reserved blocks that are routed but belong to no connection: ORCHIDv2
+        # (RFC 7343) and the deprecated 6to4 relay anycast (RFC 7526).
+        ("home 2001:20:1f2:3b40::1", "public-ip"),
         ("contact jane.doe@mail.example-corp.fr", "email"),
         ("author jane.doe+noreply@mail.example-corp.fr", "email"),
         ("author noreply@family-domain.fr", "email"),
@@ -68,8 +71,8 @@ def fiction_detected(monkeypatch: pytest.MonkeyPatch) -> None:
         ("call +44 20 7946 0738", "phone"),
         ("see https://myhome.example-corp.fr/api", "url"),
         ("see http://user:pw@nas.lan:8080/x", "url"),
-        ("wan http://11.22.33.44:8123/api", "url"),
-        ("wan http://[2a00:1111::1]:8123", "url"),
+        ("wan http://192.88.99.34:8123/api", "url"),
+        ("wan http://[2001:20::1]:8123", "url"),
         ("ws wss://zorblequix.duckdns.org/api/websocket", "url"),
         ("cam rtsp://cam.family-domain.net/live", "url"),
         ("broker mqtt://broker.family-domain.net:1883", "url"),

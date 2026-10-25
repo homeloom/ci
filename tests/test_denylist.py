@@ -211,6 +211,43 @@ def test_numbers_do_not_match_dates_times_and_lists(text: str) -> None:
     assert not NUMBERS.matches(text)
 
 
+@pytest.mark.parametrize(
+    ("term", "text"),
+    [
+        ("00:00:5E:00:53:9D", "mac 00:00:5e:00:53:9d here"),
+        ("(202) 555-0143", "call (202) 555-0143"),
+        ("03/12/1985", "born 03/12/1985"),
+        ("32.87336, -117.22743", "at 32.87336, -117.22743"),
+        ("12, rue Quillmore", "12, rue Quillmore"),
+        ("12 rue Quillmore", "Address: 12, rue Quillmore"),
+        ("Bluefinch: 4471", "Bluefinch: 4471"),
+        ("12:30", "Retry after 12:30."),
+    ],
+)
+def test_terms_with_numbers_match_as_written(term: str, text: str) -> None:
+    assert Denylist(term).matches(text)
+
+
+@pytest.mark.parametrize(
+    ("term", "text"),
+    [
+        ("03/12/1985", "03/12/19850"),
+        ("12 rue Quillmore", "12: rue Quillmore"),
+        ("Quillmore Road 12", "Quillmore Road, 12"),
+        ("Flat 3 12 Quillmore Road", "Flat 3, 12 Quillmore Road"),
+    ],
+)
+def test_terms_with_numbers_keep_their_limits(term: str, text: str) -> None:
+    assert not Denylist(term).matches(text)
+
+
+def test_terms_are_grouped_by_their_first_character() -> None:
+    denylist = Denylist("Zorble\nzorblequix\n12 rue Quillmore\n192.0.2.47\n-Bluefinch-\n#x\n!!!")
+    text = "a zorble, 192.0.2.47, ZORBLEQUIX and 12 rue quillmore; bluefinch\n"
+    assert len(list(denylist._matches(text))) == 5
+    assert not denylist.matches("xzorble 1192.0.2.47 192.0.2.470 v192.0.2.47")
+
+
 def test_numbers_in_binary_content() -> None:
     assert NUMBERS.matches_binary(b"\x00Code 12.3.0 here\x00")
     assert not NUMBERS.matches_binary(b"\x00DateTime\x002026:12:30 12:30:00\x00")

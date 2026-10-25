@@ -63,16 +63,19 @@ _ESCAPE_AFTER = re.compile(r"\\u[0-9a-f]{4}|\\x[0-9a-f]{2}|%[0-9a-f]{2}|&#?\w+;"
 _ESCAPE_BEFORE = re.compile(rf"(?:{_ESCAPE_AFTER.pattern}|\\u[0-9a-f]{{8}})\Z")
 # A lower case letter followed by a capital, as in "getName".
 _CAMEL = re.compile(r"(?<=[a-z\xdf-\xf6\xf8-\xff])(?=[A-Z\xc0-\xd6\xd8-\xde])")
-# What may separate two words of a term. Between letters: anything but
-# letters and digits, or nothing, so that "First Last" also matches
-# "first_last" and "FirstLast". Next to a number, no comma or colon, which
-# separate the values of a list or a mapping: "step 12" does not match
-# '"step": 12'. Between two numbers, exactly one space, dot, dash or
-# underscore, so that "12 3 0" does not match "2026-12-30", "12:30", "1230"
-# or numbers listed one per line.
+# What may separate two words of a term, besides the separator the term
+# itself uses there. Between letters: anything but letters and digits, or
+# nothing, so that "First Last" also matches "first_last" and "FirstLast".
+# Before a number, no comma or colon, which separate the values of a list
+# or a mapping: "step 12" does not match '"step": 12'. After a number, no
+# colon, but a comma, as in "12, Main Street". Between two numbers, exactly
+# one space, dot, dash or underscore, so that "12 3 0" does not match
+# "2026-12-30", "12:30", "1230" or numbers listed one per line.
 _LETTERS_GAP = r"[\W_]*"
-_NUMBER_GAP = r"(?:[^\w,:]|_)*"
+_BEFORE_NUMBER_GAP = r"(?:[^\w,:]|_)*"
+_AFTER_NUMBER_GAP = r"(?:[^\w:]|_)*"
 _NUMBERS_GAP = r"[ ._-]"
+_SEPARATORS = re.compile(r"[\W_]+")
 # The digits of hexadecimal numbers: hashes spell terms made only of them.
 _HEX_DIGITS = frozenset("0123456789abcdef")
 # Letters that Unicode does not decompose into a base letter and an accent.
@@ -147,7 +150,7 @@ def _character(code: int) -> str:
     return chr(code) if code <= 0x10FFFF else "\N{REPLACEMENT CHARACTER}"
 
 
-def _term_pattern(words: list[str], glued: bool) -> str:
+def _term_pattern(words: list[str], separators: list[str], glued: bool) -> str:
     """Return the pattern of a term made of words, with its boundaries.
 
     A term never touches a letter. Where it starts or ends with a number, it
@@ -156,9 +159,18 @@ def _term_pattern(words: list[str], glued: bool) -> str:
     may touch digits, as in "name42" or "v2name".
     """
     pattern = re.escape(words[0])
-    for before, word in pairwise(words):
-        numbers = (before[-1].isdecimal(), word[0].isdecimal())
-        gap = _NUMBERS_GAP if all(numbers) else _NUMBER_GAP if any(numbers) else _LETTERS_GAP
+    for (before, word), own in zip(pairwise(words), separators, strict=True):
+        if before[-1].isdecimal() and word[0].isdecimal():
+            gap = _NUMBERS_GAP
+        elif before[-1].isdecimal():
+            gap = _AFTER_NUMBER_GAP
+        elif word[0].isdecimal():
+            gap = _BEFORE_NUMBER_GAP
+        else:
+            gap = _LETTERS_GAP
+        if gap != _LETTERS_GAP:
+            # A term always matches as it is written.
+            gap = f"(?:{re.escape(own)}|{gap})"
         pattern += gap + re.escape(word)
     if words[0][0].isdecimal():
         start = r"(?<![^\W_])(?<!\d\.)"
@@ -171,12 +183,34 @@ def _term_pattern(words: list[str], glued: bool) -> str:
     return start + pattern + end
 
 
-def _alternation(patterns: Iterable[str]) -> re.Pattern[str] | None:
-    """Compile term patterns into one that matches any of them."""
-    patterns = sorted(patterns, key=len, reverse=True)
-    if not patterns:
+def _alternation(terms: Iterable[tuple[str, str]]) -> re.Pattern[str] | None:
+    """Compile term patterns, each with its first character, into one.
+
+    The terms are grouped by their first character, and each group first
+    checks what every term in it needs before it: no letter, and for terms
+    that start with a number, no digit either. Most places in a text then
+    fail without trying each term.
+    """
+    groups: dict[str, list[str]] = {}
+    for pattern, first in terms:
+        groups.setdefault(first, []).append(pattern)
+    if not groups:
         return None
-    return re.compile("|".join(patterns))
+    alternatives = []
+    for first, patterns in sorted(groups.items()):
+        guard = r"(?<!\d)" if first.isdecimal() else ""
+        patterns.sort(key=len, reverse=True)
+        alternatives.append(f"(?={re.escape(first)}){guard}(?:{'|'.join(patterns)})")
+    firsts = "".join(map(re.escape, sorted(groups)))
+    return re.compile(rf"(?<![^\W\d_])(?=[{firsts}])(?:{'|'.join(alternatives)})")
+
+
+def _split(text: str) -> tuple[list[str], list[str]]:
+    """Return the words of a text and the separators between them."""
+    core = re.sub(r"\A[\W_]+|[\W_]+\Z", "", text)
+    if not core:
+        return [], []
+    return _SEPARATORS.split(core), _SEPARATORS.findall(core)
 
 
 class Denylist:
@@ -198,24 +232,29 @@ class Denylist:
         self.terms = list(dict.fromkeys(terms))
         # The most words in a term, which is how many lines a term can span.
         self.longest_term = 0
-        letters: dict[str, int] = {}
+        # The pattern of each term, with its size and its first character.
+        letters: dict[str, tuple[int, str]] = {}
         for term in self.terms:
             # Camel case is split before case is folded, so that "FirstLast"
             # also matches "First Last".
-            words = _words(normalize(_CAMEL.sub(" ", term)))
+            words, separators = _split(normalize(_CAMEL.sub(" ", term)))
             if words:
                 size = sum(map(len, words))
                 # Short terms, and terms that hexadecimal numbers spell,
                 # would match inside identifiers and hashes if glued.
                 glued = size >= MIN_BINARY_TERM and not set("".join(words)) <= _HEX_DIGITS
-                letters[_term_pattern(words, glued)] = size
+                letters[_term_pattern(words, separators, glued)] = (size, words[0][0])
                 self.longest_term = max(self.longest_term, len(words))
-        self._pattern = _alternation(letters)
+        self._pattern = _alternation((p, first) for p, (_, first) in letters.items())
         # Random bytes spell short words by chance, so in binary content
         # shorter terms only count inside phrases (see matches_binary).
-        self._long = _alternation(p for p, size in letters.items() if size >= MIN_BINARY_TERM)
+        self._long = _alternation(
+            (p, first) for p, (size, first) in letters.items() if size >= MIN_BINARY_TERM
+        )
         self._phrase = _alternation(
-            p for p, size in letters.items() if MIN_PHRASE_TERM <= size < MIN_BINARY_TERM
+            (p, first)
+            for p, (size, first) in letters.items()
+            if MIN_PHRASE_TERM <= size < MIN_BINARY_TERM
         )
 
     def __bool__(self) -> bool:
