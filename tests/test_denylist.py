@@ -8,7 +8,14 @@ import time
 import pytest
 
 from ci_checks._common import CheckError
-from ci_checks.denylist import Denylist, denylist_sources, location, normalize, unescape
+from ci_checks.denylist import (
+    Denylist,
+    denylist_sources,
+    location,
+    normalize,
+    split_camel,
+    unescape,
+)
 
 TERMS = """\ufeff# Invented terms only.
 
@@ -172,6 +179,10 @@ NUMBERS = Denylist("12.3.0\nstep 12\nbus 917")
         "Step-12",
         "step12",
         "bus 917.",
+        # A comma or a colon right after the word, followed by white space.
+        "step: 12",
+        "Step, 12",
+        "step:\t12",
     ],
 )
 def test_numbers_match_with_their_separators(text: str) -> None:
@@ -201,10 +212,13 @@ def test_numbers_match_with_their_separators(text: str) -> None:
         "12. 3. 0",
         "matrix(12,3,0,1,5,5)",
         '"step": 12',
-        "step: 12",
+        "'step': 12",
+        '["step", 12]',
+        "step:12",
+        "step ,12",
         "steps 12",
         "step 120",
-        "[bus, 917]",
+        '["bus", 917]',
     ],
 )
 def test_numbers_do_not_match_dates_times_and_lists(text: str) -> None:
@@ -222,6 +236,9 @@ def test_numbers_do_not_match_dates_times_and_lists(text: str) -> None:
         ("12 rue Quillmore", "Address: 12, rue Quillmore"),
         ("Bluefinch: 4471", "Bluefinch: 4471"),
         ("12:30", "Retry after 12:30."),
+        ("Quillmore Road 12", "Quillmore Road, 12"),
+        ("Via Quillmore 12", "Via Quillmore, 12"),
+        ("Quillmore Lane 12", "Quillmore Lane: 12"),
     ],
 )
 def test_terms_with_numbers_match_as_written(term: str, text: str) -> None:
@@ -233,7 +250,7 @@ def test_terms_with_numbers_match_as_written(term: str, text: str) -> None:
     [
         ("03/12/1985", "03/12/19850"),
         ("12 rue Quillmore", "12: rue Quillmore"),
-        ("Quillmore Road 12", "Quillmore Road, 12"),
+        ("Quillmore Road 12", "Quillmore Road,12"),
         ("Flat 3 12 Quillmore Road", "Flat 3, 12 Quillmore Road"),
     ],
 )
@@ -295,6 +312,8 @@ LONG_NUMBERS = Denylist("06 39 98 12 34\n3e:22:fb:12:34:56")
         "06 39 98\n    12 34",
         "06 39 98 \r\n\t12 34",
         "06.39.98.12.34",
+        "06 - 39 98 12 34",
+        "06 \N{EN DASH} 39 \N{EN DASH} 98 \N{EN DASH} 12 \N{EN DASH} 34",
         "3e22fb123456",
         "3e22.fb12.3456",
         "3E-22-FB-12-34-56",
@@ -312,7 +331,8 @@ def test_long_numbers_match_their_usual_spellings(text: str) -> None:
         "06 39 98 12 34 56",
         "06 39 98 / 12 34",
         "06 39 98\n\n12 34",
-        "06 - 39 98 12 34",
+        "06 39 98 12 34 - 56",
+        "56 - 06 39 98 12 34",
         # Longer runs, written with the separators of long numbers.
         "06\N{EN DASH}39\N{EN DASH}98\N{EN DASH}12\N{EN DASH}34\N{EN DASH}56",
         "1\N{EN DASH}06\N{EN DASH}39\N{EN DASH}98\N{EN DASH}12\N{EN DASH}34",
@@ -374,7 +394,8 @@ def test_terms_are_grouped_by_their_first_character() -> None:
     denylist = Denylist("Zorble\nzorblequix\n12 rue Quillmore\n192.0.2.47\n-Bluefinch-\n#x\n!!!")
     text = "a zorble, 192.0.2.47, ZORBLEQUIX and 12 rue quillmore; bluefinch\n"
     assert len(list(denylist._matches(text))) == 5
-    assert not denylist.matches("xzorble 1192.0.2.47 192.0.2.470 v192.0.2.47")
+    assert not denylist.matches("xzorble 1192.0.2.47 192.0.2.470 v1.192.0.2.47")
+    assert denylist.matches("v192.0.2.47")
 
 
 def test_terms_with_many_numbers_fail_fast() -> None:
@@ -643,3 +664,136 @@ def test_denylist_sources_reject_bad_json(value: str) -> None:
         denylist_sources(environ)
     assert value not in str(error.value)
     assert "CI_SECRETS" not in environ
+
+
+@pytest.mark.parametrize(
+    ("text", "found"),
+    [
+        ("v12.3.0", True),
+        ("Release V12.3.0.", True),
+        ("tag release-v12.3.0", True),
+        ("v1.12.3.0", False),
+        ("v12.3.01", False),
+        # Only before a dotted number, so that SVG paths and identifiers
+        # do not match.
+        ("M12 3 0 L5", False),
+        ("x12_3_0", False),
+        ("v12-3-0", False),
+    ],
+)
+def test_letters_before_a_dotted_number(text: str, found: bool) -> None:
+    assert NUMBERS.matches(text) is found
+
+
+@pytest.mark.parametrize(
+    ("text", "found"),
+    [
+        ("Zorblequix5G", True),
+        ("Zorblequix 5G", True),
+        ("zorblequix-5g", True),
+        ("ZORBLEQUIX_5G", True),
+        ("Zorblequix 5", False),
+        ("Zorblequix 5Gx", False),
+        ("Zorblequix 15G", False),
+    ],
+)
+def test_terms_with_letters_and_digits_match_them_separated(text: str, found: bool) -> None:
+    assert Denylist("Zorblequix5G").matches(text) is found
+
+
+@pytest.mark.parametrize(
+    ("text", "found"),
+    [
+        ("LeBlanc", True),
+        ("leblanc", True),
+        ("le-blanc", True),
+        ("LE_BLANC", True),
+        ("getLeBlanc()", True),
+        # Short parts of a camel case term do not match words of a sentence.
+        ("le blanc", False),
+        ("Le Blanc", False),
+        ("le\nblanc", False),
+        ("Van Bluefinch", False),
+        ("van-bluefinch", True),
+    ],
+)
+def test_short_parts_of_camel_case_terms(text: str, found: bool) -> None:
+    assert Denylist("LeBlanc\nVanBluefinch").matches(text) is found
+
+
+def test_camel_case_names_in_binary_content() -> None:
+    denylist = Denylist("Bluefinch")
+    assert denylist.matches_binary(b"\x00\x01setBluefinch\x00")
+    assert denylist.matches_binary(b"\x00" + "setBluefinch".encode("latin-1") + b"\xe9\x00")
+    assert not denylist.matches_binary(b"\x00\x01setBluefinches\x00")
+    assert Denylist("Quill").matches_binary(b"\x00aQuill\x00")
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "&amp;quot;Zorblequix&amp;quot;",
+        "Zorble%2520Quix",
+        "Zorble&amp;nbsp;Quix",
+        "&amp;#90;orblequix",
+        # References without a semicolon, which browsers decode too.
+        "&ampzorblequix",
+        # Escapes for control characters in string literals.
+        "\\bzorblequix",
+        "\\fzorblequix",
+        "\\vzorblequix",
+    ],
+)
+def test_terms_hidden_by_escapes(text: str) -> None:
+    denylist = Denylist("Zorblequix\nZorble Quix")
+    assert denylist.matches(text)
+    assert location(denylist, f"docs/{text}.md") == ("docs/[redacted]", None)
+
+
+@pytest.mark.parametrize(
+    "text",
+    ["Zorble\N{COMBINING GRAPHEME JOINER}quix", "Zorble\N{VARIATION SELECTOR-16}quix"],
+)
+def test_marks_without_a_combining_class_are_ignored(text: str) -> None:
+    assert Denylist("Zorblequix").matches(text)
+
+
+def test_terms_over_lines_that_decode_twice() -> None:
+    # The lines around a line that decodes twice are searched with it.
+    denylist = Denylist("Bluefinch Quillmore")
+    assert denylist.spans("intro\nBluefinch\n&amp;#81;uillmore\nend") == [(2, 3)]
+
+
+def test_upper_case_escapes_stay_whole_in_camel_case_names() -> None:
+    # The escape stands for a letter of the word, whatever the case of its
+    # digits.
+    denylist = Denylist("Bluefinch")
+    assert not denylist.matches("Ren\\xC9Bluefinch")
+    assert not denylist.matches("Ren\\xc9Bluefinch")
+    assert denylist.matches("Ren\\xA9Bluefinch")
+
+
+def test_split_camel_keeps_escapes_whole() -> None:
+    assert split_camel("getName") == "get\x00Name"
+    for escape in ("\\xA9", "\\uaBcD", "\\UaBcDeFaB", "%aB", "&#xaBcD;"):
+        assert split_camel(f"{escape}Quix") == f"{escape}Quix"
+        assert split_camel(f"fooBar{escape}") == f"foo\x00Bar{escape}"
+
+
+def test_numeric_references_of_any_length() -> None:
+    denylist = Denylist("Zorblequix")
+    assert denylist.matches("&#" + "0" * 5000 + "90;orblequix")
+    assert denylist.matches("&#x" + "0" * 5000 + "5a;orblequix")
+    assert denylist.matches("&#" + "9" * 5000 + ";Zorblequix")
+    assert unescape("&#" + "9" * 5000 + "; &#x0000041; &#00065;") == "\ufffd A A"
+
+
+def test_mask_values_of_numbers() -> None:
+    values = Denylist("12.30\n12.3.0\n06 39 98 12 34").mask_values()
+    assert {"12.30", "12 30", "12.3.0", "12 3 0", "12 3.0"} <= values
+    assert not {"1230", "12-30", "12_30", "12-3-0"} & values
+    assert {"06 39 98 12 34", "0639981234", "06-39-98-12-34", "06.39.98.12.34"} <= values
+    # Terms of more than three words use one separator everywhere.
+    values = Denylist("192.0.2.47\nZorble 1 2 Quix").mask_values()
+    assert {"192.0.2.47", "192 0 2 47", "zorble_1 2_quix", "zorble-1 2-quix"} <= values
+    assert not {"1920247", "192-0-2-47", "zorble_1_2_quix"} & values

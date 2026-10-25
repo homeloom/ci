@@ -6,15 +6,45 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.1.1]
+
 ### Changed
 
+- Denylist: a comma or a colon between a word and a number is accepted when
+  it follows the word and comes before white space, as in an address
+  (`Quillmore Lane, 12`), while `"step": 12` and `["step", 12]` still do not
+  match `step 12`.
+- Denylist: letters may come right before a term that starts with a dotted
+  number, as in `v12.3.0`.
+- Denylist: a term that glues letters and digits, such as `Name5G`, also
+  matches `Name 5G`.
+- Denylist: where a camel case term has a part of three letters or less, as
+  in `LeBlanc`, white space no longer separates its parts, so that it does
+  not match the words of a sentence.
+- Denylist: phone numbers and other terms of eight digits or more also
+  match with a dash and spaces around it between their numbers.
 - The contribution guide template and `AGENTS.md` ask for tests that do not
   depend on the machine that runs them.
+- Masking: between two numbers of a short term, only the separator of the
+  term and a space are masked, so that spellings such as `1230` or `12-30`
+  stay readable in logs.
 
 ### Fixed
 
 - Privacy check: a commit that adds a `gitleaks:allow` line to a binary
   file gets a warning, as one that adds it to a text file does.
+- Denylist: text is also decoded a second time, for escapes that were
+  themselves escaped (`&amp;quot;`, `%2520`), which hid a term and left it
+  unredacted in file paths.
+- Denylist: `\b`, `\f` and `\v` escapes, references without a semicolon,
+  the combining grapheme joiner and variation selectors no longer hide a
+  term.
+- Denylist: escapes written with upper case hexadecimal digits are no longer
+  split by the camel case view, which made the result depend on the case of
+  the digits.
+- Denylist: a numeric character reference of more than 4,300 digits no longer
+  stops the check.
+- Denylist: camel case names in binary content are searched too.
 
 ## [0.1.0]
 
