@@ -146,8 +146,8 @@ The **Hygiene** job checks:
 - **English**: French text outside translation files, in files, new commit
   messages and the pull request title and body. A line is French when it
   holds a French-only word, including a lowercase word with French accents
-  (English loanwords such as café excepted), or enough short French words
-  that English also uses (le, des, pour). A capitalized accented word, a
+  (English loanwords such as café excepted), or enough of the short French
+  words that English also uses. A capitalized accented word, a
   French word in capitals and a capitalized French word inside a sentence
   count less, because they are often names, constants or codes. Commit
   trailers that name people are skipped. Translation files are skipped:
