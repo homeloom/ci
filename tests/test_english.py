@@ -47,6 +47,21 @@ def strip_accents(text: str) -> str:
         "fix: options nombreuses et dangereuses",
         "fix: l'API renvoie une liste vide",
         "Lorsqu'on relance, rien ne change",
+        # A lowercase word with French accents is French.
+        "fix: régression",
+        "feat: thème sombre",
+        "docs: légère reformulation",
+        "# Conversion en degrés Celsius",
+        '"name": "Prévisions météo"',
+        '"name": "Énergie consommée"',
+        # A capitalized accented word counts as one signal.
+        "Réparé le bug",
+        '"name": "Température de consigne"',
+        # French words in capitals are signals.
+        "fix: CORRIGE LE CAPTEUR DE TEMPERATURE",
+        "# NE PAS SUPPRIMER CETTE LIGNE",
+        "# ATTENTION : NE PAS MODIFIER CE FICHIER, IL EST GENERE AUTOMATIQUEMENT",
+        '_LOGGER.error("ERREUR DE CONNEXION AU SERVEUR")',
     ],
 )
 def test_french_detected(text: str) -> None:
@@ -93,6 +108,8 @@ def test_decomposed_accents_are_seen(text: str) -> None:
         "AUX ILS EST SI",
         '"aux": "AUX",',
         'self._source = self.send_command("SI?").removeprefix("SI")',
+        "await asyncio.sleep(SECONDE)",
+        "BLUEFINCH AVANCE GmbH",
         # English words that are also French.
         "# Build the PKCE code verifier",
         'raise InvalidAuth("Invalid code verifier")',
@@ -107,7 +124,18 @@ def test_decomposed_accents_are_seen(text: str) -> None:
         '"CI": "Côte d\'Ivoire",',
         '"brand": "Bluéfinch",',
         "Weather data for Zürich, Genève and Réunion",
-        "the bluéfinch hub",
+        # A single accented letter is not a word ("à la carte").
+        '"é",',
+        "# Matches '/*' and '/**', à la Javadoc",
+        # Inside a sentence, a capitalized word is a name, and a word with
+        # inner capitals is an identifier.
+        '"title": "Waste collection Celle"',
+        "Waste collection for Celle and nearby towns",
+        "Tickets for the Notre Bluefinch museum",
+        "The Ligne Bluefinch sofa sensor",
+        "# The socket must be bound before we call ConnectEx().",
+        "ov.ConnectEx(conn.fileno(), address)",
+        "Serves hors d'oeuvres at 6 pm",
         # Prefixes, slugs, URLs and code are not sentences.
         "The relay must de-energize before the motor reverses.",
         "Models: nous-hermes2, nous-hermes2-mixtral",
@@ -130,8 +158,13 @@ def test_allowed_words() -> None:
     # Brand names made of French words, written as the brand writes them.
     assert english.looks_french('"name": "Bien-Être Connect"')
     assert not english.looks_french('"name": "Bien-Être Connect"', frozenset({"bien-être"}))
-    assert english.looks_french("fix: handle Écran's dimmer")
-    assert not english.looks_french("fix: handle Écran's dimmer", frozenset({"écran"}))
+    assert english.looks_french("Écran's dimmer is supported")
+    assert not english.looks_french("Écran's dimmer is supported", frozenset({"écran"}))
+    # Inside a sentence, a capitalized word is taken for a name anyway.
+    assert not english.looks_french("fix: handle Écran's dimmer")
+    # A brand written in lowercase with accents looks like a French word.
+    assert english.looks_french("the bluéfinch hub")
+    assert not english.looks_french("the bluéfinch hub", frozenset({"bluéfinch"}))
 
 
 @pytest.mark.parametrize(
@@ -169,19 +202,52 @@ def test_allowed_words() -> None:
         ("README.cy.md", True),
         ("docs/fr/index.md", True),
         ("docs/fr/guide/setup.md", True),
+        ("docs/de/guide/setup.md", True),
         ("docs/en/index.md", False),
         ("docs/api/index.md", False),
         ("docs/index.md", False),
-        # Only data and documentation files are translations.
+        # Translation modules are named after their language or sit in its folder.
+        ("locales/fr.js", True),
+        ("src/locales/fr.ts", True),
+        ("app/locales/fr/common.js", True),
+        ("frontend/src/locales/fr.mjs", True),
+        ("i18n/fr.toml", True),
+        ("locales/fr.ini", True),
+        ("locales/en.js", False),
+        ("app/locales/en-GB/common.js", False),
         ("src/locales/loader.py", False),
         ("i18n/index.ts", False),
         ("docs/fr/conf.py", False),
         ("guide-fr.md", False),
         ("LICENSE", False),
+        # Language codes are also folder and file names (Home Assistant OS):
+        # a document only counts as a translation next to its English
+        # original, and a page under docs/<language>/ only when docs/en/ has it.
+        ("docs/os/installation.md", False),
+        ("docs/ha/automations.md", False),
+        ("docs/it/network.md", False),
+        ("docs/fr/faq.md", False),
+        ("notes.to.md", False),
+        ("requirements.ha.txt", False),
+        # Next to README.md, README.ha.md is taken for a translation into Hausa.
+        ("README.ha.md", True),
     ],
 )
 def test_is_translation(path: str, expected: bool) -> None:
-    assert english.is_translation(path) is expected
+    assert english.is_translation(path, REPOSITORY_FILES | {path}) is expected
+
+
+# The English documents that the documents above may translate.
+REPOSITORY_FILES = frozenset(
+    {
+        "README.md",
+        "docs/guide.md",
+        "docs/index.md",
+        "docs/installation.md",
+        "docs/en/index.md",
+        "docs/en/guide/setup.md",
+    }
+)
 
 
 def test_check_files(repo: Repo, capsys: Capture) -> None:
@@ -226,6 +292,51 @@ def test_english_ui_text_needs_no_pragma(repo: Repo) -> None:
     assert reporter.count == 0
 
 
+def test_french_ui_text_is_reported(repo: Repo, capsys: Capture) -> None:
+    # Labels are short and start with a capital, often an accented one.
+    repo.write(
+        "custom_components/demo/strings.json",
+        """{
+  "entity": {
+    "sensor": {
+      "outdoor_temperature": {"name": "Température extérieure"},
+      "setpoint": {"name": "Température de consigne"},
+      "forecast": {"name": "Prévisions météo"},
+      "energy": {"name": "Énergie consommée"},
+      "pressure": {"name": "Pression atmosphérique"}
+    }
+  }
+}
+""",
+    )
+    reporter = Reporter("English")
+    english.check_files(repo.root, ["custom_components/demo/strings.json"], reporter)
+    out = capsys.readouterr().out
+    assert reporter.count == 5
+    assert [f"line={number}::" in out for number in range(4, 9)] == [True] * 5
+
+
+def test_translations_need_their_english_original(repo: Repo, capsys: Capture) -> None:
+    french = "Copiez le dossier puis redémarrez Home Assistant.\n"
+    files = {
+        "docs/en/setup.md": "Copy the folder, then restart Home Assistant.\n",
+        "docs/fr/setup.md": french,
+        "docs/os/install.md": french,
+        "README.md": "Copy the folder, then restart Home Assistant.\n",
+        "README.fr.md": french,
+        "notes.fr.md": french,
+        "src/locales/fr.js": 'export default { error: "Impossible de joindre le serveur" };\n',
+    }
+    for path, content in files.items():
+        repo.write(path, content)
+    reporter = Reporter("English")
+    english.check_files(repo.root, list(files), reporter)
+    out = capsys.readouterr().out
+    assert reporter.count == 2
+    assert "file=docs/os/install.md,line=1::" in out
+    assert "file=notes.fr.md,line=1::" in out
+
+
 def test_check_messages(repo: Repo, capsys: Capture) -> None:
     base = repo.commit("chore: initial")
     repo.commit("fix: corrige le capteur")
@@ -243,6 +354,27 @@ def test_check_messages(repo: Repo, capsys: Capture) -> None:
     assert "Pull request body looks French." in out
 
 
+def test_title_in_capitals(repo: Repo, capsys: Capture) -> None:
+    # The title check accepts a first word in capitals, as in "fix: MQTT discovery".
+    head = repo.commit("chore: initial")
+    reporter = Reporter("English")
+    title = "fix: CORRIGE LE CAPTEUR DE TEMPERATURE"
+    english.check_messages(repo.root, pr_event(head, head, title=title), reporter)
+    assert reporter.count == 1
+    assert "Pull request title looks French." in capsys.readouterr().out
+
+
+# Trailers that would look French if they were prose.
+CO_AUTHOR = "Co-authored-by: Bluefinch de la Roche du Lac <2+bluefinch@users.noreply.github.com>"
+SIGNER = "Signed-off-by: Bluefinch du Pré de la Brume <3+example@users.noreply.github.com>"
+
+
+@pytest.mark.parametrize("trailer", [CO_AUTHOR, SIGNER])
+def test_trailer_names_look_french(trailer: str) -> None:
+    # Otherwise the tests of trailer skipping below would prove nothing.
+    assert english.looks_french(trailer)
+
+
 def test_trailers_naming_people_are_skipped(repo: Repo, capsys: Capture) -> None:
     base = repo.commit("chore: initial")
     # The message GitHub writes when it squashes the commits of several authors.
@@ -250,9 +382,9 @@ def test_trailers_naming_people_are_skipped(repo: Repo, capsys: Capture) -> None
         "feat: add a humidity sensor (#12)\n\n"
         "* feat: add a humidity sensor\n\n"
         "---------\n\n"
-        "Co-authored-by: Bluefinch de la Roche du Lac <2+bluefinch@users.noreply.github.com>\n"
+        f"{CO_AUTHOR}\n"
         "Reviewed-by: Bluefinch\n du Lac des Bois <4+example@users.noreply.github.com>\n"
-        "Signed-off-by: José García <3+example@users.noreply.github.com>"
+        f"{SIGNER}"
     )
     reporter = Reporter("English")
     english.check_messages(repo.root, pr_event(base, head), reporter)
@@ -261,14 +393,38 @@ def test_trailers_naming_people_are_skipped(repo: Repo, capsys: Capture) -> None
     breaking = repo.commit(
         "feat!: drop the cloud API\n\nBREAKING-CHANGE: le capteur ne fonctionne plus"
     )
+    footer = repo.commit(
+        f"feat!: drop the cloud API\n\nBREAKING CHANGE: le capteur ne fonctionne plus\n{CO_AUTHOR}"
+    )
     in_body = repo.commit(
         "fix: add a sensor\n\nCo-authored-by: de la Roche du Lac\n\nThanks for the review."
     )
     english.check_messages(repo.root, pr_event(head, in_body), reporter)
     out = capsys.readouterr().out
-    assert reporter.count == 2
+    assert reporter.count == 3
     assert f"Commit {breaking[:12]}: message looks French." in out
+    assert f"Commit {footer[:12]}: message looks French." in out
     assert f"Commit {in_body[:12]}: message looks French." in out
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        # The line that `git cherry-pick -x` adds to the trailers.
+        f"fix: handle timeouts\n\n{SIGNER}\n(cherry picked from commit {'0123abcd' * 5})",
+        # The breaking change footer of Conventional Commits, with a space.
+        "feat!: drop the cloud API (#7)\n\n"
+        "* feat!: drop the cloud API\n\n"
+        "---------\n\n"
+        f"BREAKING CHANGE: the cloud option is gone\n{CO_AUTHOR}",
+    ],
+)
+def test_trailer_blocks_as_git_reads_them(repo: Repo, message: str) -> None:
+    base = repo.commit("chore: initial")
+    head = repo.commit(message)
+    reporter = Reporter("English")
+    english.check_messages(repo.root, pr_event(base, head), reporter)
+    assert reporter.count == 0
 
 
 def test_dependabot_commits_are_skipped(repo: Repo) -> None:
