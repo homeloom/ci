@@ -74,14 +74,15 @@ that is started again keeps the event of its first attempt, whose text may
 have been edited since.
 
 Secrets: every secret whose name starts with `PRIVACY_DENYLIST`, such as
-`PRIVACY_DENYLIST` and `PRIVACY_DENYLIST_STREETS`, holds a denylist, one term
-per line (lines starting with `#` are comments). The check merges them all.
+`PRIVACY_DENYLIST` and `PRIVACY_DENYLIST_2`, holds a denylist, one term per
+line (lines starting with `#` are comments). The check merges them all.
 A secret cannot be read back, so separate lists let each one be replaced
 whole without retyping the others. Callers pass them with
 `secrets: inherit` (see the design notes). The checks print how many lists
 were read and how many are empty, never a term. GitHub itself shows the
 secrets context in the step headers with every value masked, so the names of
-the secrets appear in the logs: give them neutral names. GitHub also masks
+the secrets appear in the logs: give them neutral, numbered names that say
+nothing about their content. GitHub also masks
 each line of a secret everywhere in the log, so a line made only of `#`
 signs hides those signs in the whole log; start comments with `# ` and a
 word.
@@ -90,8 +91,17 @@ Matching ignores case, accents and invisible characters such as soft
 hyphens, respects word boundaries and accepts any punctuation, underscore,
 line break or nothing at all between the words of a term, so `First Last`
 also matches `first_last`, `First-Last`, `FirstLast` and a `First` that ends
-one line followed by a `Last` that starts the next. Terms of five letters or
-more also match as a part of a camel case name, such as `getFirstLast`. Text
+one line followed by a `Last` that starts the next. A camel case term such
+as `FirstLast` matches the same spellings. Terms of five letters or more
+also match as a part of a camel case name, such as `getFirstLast`, and next
+to digits, such as `FirstLast2`, unless they are spelled only with
+hexadecimal digits. Numbers are stricter, so that dates, times and versions
+do not match: a number never touches another digit or a dot followed by a
+digit, two numbers are separated by exactly one space, dot, dash or
+underscore, and a word and a number by anything but a comma or a colon. So
+`12.3.0` matches `12 3 0` and `12_3_0`, but not `2026-12-30`, `12:30`,
+`1230`, `[12, 3, 0]` or `v1.12.3.0`, and `step 12` does not match
+`"step": 12`. Text
 that writes characters as escapes (`\u00e9`, `\x41`, `\n`, `%20`, `&eacute;`)
 is also matched decoded. List only terms that never belong in a repository:
 not the GitHub usernames of maintainers, which appear in noreply addresses

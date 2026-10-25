@@ -672,7 +672,7 @@ def test_main_reads_every_denylist_secret(
         "github_token": "unrelated",
         "DEPLOY_KEY": "unrelated",
         "PRIVACY_DENYLIST": "Bluefinch",
-        "PRIVACY_DENYLIST_STREETS": "rue des Lilas",
+        "PRIVACY_DENYLIST_2": "rue des Lilas",
         "PRIVACY_DENYLIST_EMPTY": "# nothing yet\n",
     }
     assert run_main(repo, monkeypatch, secrets) == 1
@@ -681,7 +681,7 @@ def test_main_reads_every_denylist_secret(
     assert "::warning::1 of the 3 denylist secrets are empty." in out
     assert "notes.md:1: denylisted term." in out
     assert "notes.md:2: denylisted term." in out
-    assert "STREETS" not in out
+    assert "PRIVACY_DENYLIST_2" not in out
     assert "unrelated" not in out
 
 

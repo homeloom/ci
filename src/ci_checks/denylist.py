@@ -2,9 +2,10 @@
 
 Matching ignores case, accents and invisible characters, respects word
 boundaries, and lets the words of a term be separated by any punctuation,
-underscores or line breaks. Text that writes characters as escapes (\\u,
-\\x and \\n escapes, percent-encoding or HTML entities) is also matched as
-it reads once decoded.
+underscores or line breaks. Numbers are stricter, so that dates, times and
+versions do not spell terms made of numbers. Text that writes characters as
+escapes (\\u, \\x and \\n escapes, percent-encoding or HTML entities) is
+also matched as it reads once decoded.
 """
 
 from __future__ import annotations
@@ -14,7 +15,7 @@ import json
 import re
 import unicodedata
 from collections.abc import Iterable, Iterator, MutableMapping
-from itertools import product
+from itertools import pairwise, product
 from pathlib import PurePosixPath
 
 from ci_checks._common import LEGACY, CheckError
@@ -62,6 +63,18 @@ _ESCAPE_AFTER = re.compile(r"\\u[0-9a-f]{4}|\\x[0-9a-f]{2}|%[0-9a-f]{2}|&#?\w+;"
 _ESCAPE_BEFORE = re.compile(rf"(?:{_ESCAPE_AFTER.pattern}|\\u[0-9a-f]{{8}})\Z")
 # A lower case letter followed by a capital, as in "getName".
 _CAMEL = re.compile(r"(?<=[a-z\xdf-\xf6\xf8-\xff])(?=[A-Z\xc0-\xd6\xd8-\xde])")
+# What may separate two words of a term. Between letters: anything but
+# letters and digits, or nothing, so that "First Last" also matches
+# "first_last" and "FirstLast". Next to a number, no comma or colon, which
+# separate the values of a list or a mapping: "step 12" does not match
+# '"step": 12'. Between two numbers, exactly one space, dot, dash or
+# underscore, so that "12 3 0" does not match "2026-12-30", "12:30", "1230"
+# or numbers listed one per line.
+_LETTERS_GAP = r"[\W_]*"
+_NUMBER_GAP = r"(?:[^\w,:]|_)*"
+_NUMBERS_GAP = r"[ ._-]"
+# The digits of hexadecimal numbers: hashes spell terms made only of them.
+_HEX_DIGITS = frozenset("0123456789abcdef")
 # Letters that Unicode does not decompose into a base letter and an accent.
 _FOLD = str.maketrans(
     {
@@ -134,20 +147,46 @@ def _character(code: int) -> str:
     return chr(code) if code <= 0x10FFFF else "\N{REPLACEMENT CHARACTER}"
 
 
+def _term_pattern(words: list[str], glued: bool) -> str:
+    """Return the pattern of a term made of words, with its boundaries.
+
+    A term never touches a letter. Where it starts or ends with a number, it
+    touches no digit either, nor a dot followed by a digit, as in a longer
+    version or address. Where it starts or ends with a letter, a glued term
+    may touch digits, as in "name42" or "v2name".
+    """
+    pattern = re.escape(words[0])
+    for before, word in pairwise(words):
+        numbers = (before[-1].isdecimal(), word[0].isdecimal())
+        gap = _NUMBERS_GAP if all(numbers) else _NUMBER_GAP if any(numbers) else _LETTERS_GAP
+        pattern += gap + re.escape(word)
+    if words[0][0].isdecimal():
+        start = r"(?<![^\W_])(?<!\d\.)"
+    else:
+        start = r"(?<![^\W\d_])" if glued else r"(?<![^\W_])"
+    if words[-1][-1].isdecimal():
+        end = r"(?![^\W_])(?!\.\d)"
+    else:
+        end = r"(?![^\W\d_])" if glued else r"(?![^\W_])"
+    return start + pattern + end
+
+
 def _alternation(patterns: Iterable[str]) -> re.Pattern[str] | None:
-    """Compile word patterns into one that matches any of them as whole words."""
+    """Compile term patterns into one that matches any of them."""
     patterns = sorted(patterns, key=len, reverse=True)
     if not patterns:
         return None
-    return re.compile(rf"(?<![^\W_])(?:{'|'.join(patterns)})(?![^\W_])")
+    return re.compile("|".join(patterns))
 
 
 class Denylist:
     """Terms that must never appear.
 
     "First Last" also matches "first_last", "First-Last", "FirstLast" and
-    "First\\nLast". Terms of at least MIN_BINARY_TERM letters also match as a
-    part of a camel case name, as in "getFirstLast".
+    "First\\nLast", and the term "FirstLast" matches all of them. Terms of at least
+    MIN_BINARY_TERM letters also match as a part of a camel case name, as in
+    "getFirstLast", and next to digits, as in "FirstLast2". "12.3.0" matches
+    "12 3 0" and "12_3_0", but not "2026-12-30", "12:30", "1230" or "v1.12.3.0".
     """
 
     def __init__(self, raw: str) -> None:
@@ -161,9 +200,15 @@ class Denylist:
         self.longest_term = 0
         letters: dict[str, int] = {}
         for term in self.terms:
-            words = _words(normalize(term))
+            # Camel case is split before case is folded, so that "FirstLast"
+            # also matches "First Last".
+            words = _words(normalize(_CAMEL.sub(" ", term)))
             if words:
-                letters[r"[\W_]*".join(map(re.escape, words))] = sum(map(len, words))
+                size = sum(map(len, words))
+                # Short terms, and terms that hexadecimal numbers spell,
+                # would match inside identifiers and hashes if glued.
+                glued = size >= MIN_BINARY_TERM and not set("".join(words)) <= _HEX_DIGITS
+                letters[_term_pattern(words, glued)] = size
                 self.longest_term = max(self.longest_term, len(words))
         self._pattern = _alternation(letters)
         # Random bytes spell short words by chance, so in binary content
@@ -272,7 +317,7 @@ class Denylist:
         for term in self.terms:
             for base in (term, normalize(term)):
                 values.update(_apostrophe_variants(base))
-                words = _words(base)
+                words = _words(_CAMEL.sub(" ", base))
                 if not words:
                     continue
                 gaps = len(words) - 1

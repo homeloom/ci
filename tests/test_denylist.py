@@ -18,7 +18,7 @@ Pré-Vert
 bus 917
 Ren
 Chloé
-Hélène Dupont
+Quillène Zorbefort
 Ørsted Lane
 Straße Nord
 Bedeline
@@ -39,7 +39,7 @@ def test_terms_skip_comments_blank_lines_and_duplicates() -> None:
         "bus 917",
         "Ren",
         "Chloé",
-        "Hélène Dupont",
+        "Quillène Zorbefort",
         "Ørsted Lane",
         "Straße Nord",
         "Bedeline",
@@ -63,7 +63,7 @@ def test_terms_skip_comments_blank_lines_and_duplicates() -> None:
         "PRÉ VERT",
         "chloe",
         "CHLOÉ",
-        "helene dupont",
+        "quillene zorbefort",
         "orsted_lane",
         "ØRSTED LANE",
         "strasse nord",
@@ -79,28 +79,34 @@ def test_terms_skip_comments_blank_lines_and_duplicates() -> None:
         "bus_917",
         "bus-917",
         "bus917",
-        "HeleneDupont",
-        "helene.dupont@example.com",
+        "QuilleneZorbefort",
+        "quillene.zorbefort@example.com",
         # Several spaces, tabs and line breaks between the words.
         "rue   des    lilas",
         "Rue  des\tLilas",
         "lives rue des\nLilas",
         "lives rue des\r\nlilas",
         "bus\n\n917",
-        "Hélène\n    Dupont",
+        "Quillène\n    Zorbefort",
         # Inside identifiers, paths and URLs.
         "sensor.bluefinch_door",
         "https://zorb.example/rue-des-lilas",
         "docs/Bluefinch/notes.md",
         "getBluefinch()",
         "BluefinchSensor",
+        # Longer terms glued to digits, as in numbered names.
+        "bluefinch2",
+        "Bluefinch42",
+        "v2Bluefinch",
+        "sensor2bluefinch",
+        "bluefinch_5g",
         # Invisible characters inside a word.
         "Blue\N{SOFT HYPHEN}finch",
         "Blue\N{ZERO WIDTH SPACE}finch",
         "Chlo\N{ZERO WIDTH JOINER}é",
         # Escapes, matched once decoded.
         '"name": "Chlo\\u00e9"',
-        '"holder": "H\\u00e9l\\u00e8ne Dupont"',
+        '"holder": "Quill\\u00e8ne Zorbefort"',
         "Chlo&eacute;",
         "Chlo&#233;",
         "Chlo&#xe9;",
@@ -128,7 +134,7 @@ def test_matches(text: str) -> None:
         "",
         "bluefinches",
         "superbluefinch",
-        "bluefinch2",
+        "superbluefinch2",
         "prevertical",
         "bus 9170",
         "bus917x",
@@ -148,6 +154,95 @@ def test_matches(text: str) -> None:
 )
 def test_does_not_match(text: str) -> None:
     assert not DENYLIST.matches(text)
+
+
+NUMBERS = Denylist("12.3.0\nstep 12\nbus 917")
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "12.3.0",
+        "Code: 12-3-0.",
+        "12 3 0",
+        "12_3_0",
+        "(12.3.0)",
+        "step 12",
+        "step_12",
+        "Step-12",
+        "step12",
+        "bus 917.",
+    ],
+)
+def test_numbers_match_with_their_separators(text: str) -> None:
+    assert NUMBERS.matches(text)
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        # Dates, times and longer numbers.
+        "## [1.4.0] - 2026-12-30",
+        "chore: release 1.4.0 on 2026-12-30",
+        "datetime(2026, 12, 3, 0, 0)",
+        "Retry after 12:30.",
+        "1230",
+        "12.30",
+        "112.3.0",
+        "12.3.01",
+        # Longer versions and addresses.
+        "v1.12.3.0",
+        "12.3.0.1",
+        "10.12.3.0",
+        # Lists, mappings and numbers one per line.
+        "[12, 3, 0]",
+        "12,3,0",
+        "12\n3\n0",
+        "12. 3. 0",
+        "matrix(12,3,0,1,5,5)",
+        '"step": 12',
+        "step: 12",
+        "steps 12",
+        "step 120",
+        "[bus, 917]",
+    ],
+)
+def test_numbers_do_not_match_dates_times_and_lists(text: str) -> None:
+    assert not NUMBERS.matches(text)
+
+
+def test_numbers_in_binary_content() -> None:
+    assert NUMBERS.matches_binary(b"\x00Code 12.3.0 here\x00")
+    assert not NUMBERS.matches_binary(b"\x00DateTime\x002026:12:30 12:30:00\x00")
+
+
+def test_long_terms_glued_to_digits() -> None:
+    denylist = Denylist("Zorblequix\nFacade")
+    for text in ("ssid: Zorblequix5G", "zorblequix2", "2zorblequix", "sensor2Zorblequix"):
+        assert denylist.matches(text), text
+    assert not denylist.matches("Zorblequixes")
+    assert not denylist.matches("xzorblequix2")
+    # Terms that hexadecimal digits spell stay whole words, so that hashes
+    # do not match them.
+    assert denylist.matches("facade_2")
+    assert not denylist.matches("3e9facade21")
+    assert not denylist.matches("facade2")
+
+
+def test_camel_case_terms_match_their_words() -> None:
+    denylist = Denylist("ZorbleQuixCorp")
+    for text in (
+        "ZorbleQuixCorp",
+        "zorblequixcorp",
+        "Copyright Zorble Quix Corp",
+        "zorble-quix-corp",
+        "zorble_quix_corp",
+        "getZorbleQuixCorp()",
+    ):
+        assert denylist.matches(text), text
+    assert not denylist.matches("Zorble Quix")
+    values = denylist.mask_values()
+    assert {"ZorbleQuixCorp", "Zorble Quix Corp", "zorble-quix-corp", "zorble_quix_corp"} <= values
 
 
 def test_empty_denylist_matches_nothing() -> None:
@@ -191,13 +286,13 @@ def test_normalize_and_unescape() -> None:
 
 
 def test_binary_content() -> None:
-    denylist = Denylist(f"Bluefinch\nHélène Dupont\n{SHORT_NAMES}")
+    denylist = Denylist(f"Bluefinch\nQuillène Zorbefort\n{SHORT_NAMES}")
     assert denylist.matches_binary(b"\x00\x01Artist\x00Bluefinch\x00")
     assert denylist.matches_binary(b"\x00<dc:title>Leo on the sofa</dc:title>")
     assert denylist.matches_binary(b"\xff\xfe" + "Bluefinch".encode("utf-16-le"))
-    assert denylist.matches_binary(b"\x00" + "Hélène Dupont".encode("utf-16-be"))
-    assert denylist.matches_binary(b"\x00" + "Hélène Dupont".encode() + b"\x00")
-    assert denylist.matches_binary(b"\x00" + "Hélène Dupont".encode("latin-1") + b"\x00")
+    assert denylist.matches_binary(b"\x00" + "Quillène Zorbefort".encode("utf-16-be"))
+    assert denylist.matches_binary(b"\x00" + "Quillène Zorbefort".encode() + b"\x00")
+    assert denylist.matches_binary(b"\x00" + "Quillène Zorbefort".encode("latin-1") + b"\x00")
     assert denylist.matches_binary(b"\x00" + "Leo on the sofa".encode("utf-16-le"))
     assert not denylist.matches_binary(b"\x00IDATxd%Leo#q\x00")
     assert not denylist.matches_binary(b"\x00Leo\x00")
