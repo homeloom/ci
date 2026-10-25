@@ -290,7 +290,7 @@ def test_main_reads_every_denylist_secret_and_keeps_them_from_gitleaks(
     event({})
     finding = {"RuleID": "jwt", "StartLine": 1, "Commit": sha, "File": "quillmore/settings.json"}
     fake_answers(monkeypatch, {"log": SCANNED, "report": [finding]})
-    names = {"PRIVACY_DENYLIST_PLACES": "Quillmore", "OTHER_TOKEN": "unrelated"}
+    names = {"PRIVACY_DENYLIST_1": "Quillmore", "OTHER_TOKEN": "unrelated"}
     monkeypatch.setenv("CI_SECRETS", json.dumps(names))
     assert scan(repo, fake_gitleaks) == 1
     out = output(capsys)

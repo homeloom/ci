@@ -20,6 +20,16 @@ def no_denylist_in_environment(monkeypatch: pytest.MonkeyPatch) -> None:
             monkeypatch.delenv(name)
 
 
+@pytest.fixture(autouse=True)
+def no_git_configuration(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Run git as on a runner, without an identity or any other setting."""
+    for name in list(os.environ):
+        if name.startswith(("GIT_AUTHOR_", "GIT_COMMITTER_", "GIT_CONFIG")):
+            monkeypatch.delenv(name)
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", os.devnull)
+    monkeypatch.setenv("GIT_CONFIG_NOSYSTEM", "1")
+
+
 @pytest.fixture
 def repo(tmp_path: Path) -> Repo:
     return Repo(tmp_path / "repo")
