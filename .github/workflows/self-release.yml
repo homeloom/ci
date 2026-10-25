@@ -1,0 +1,31 @@
+name: Release
+
+# Tag a release of this repository when CI passes on the commit of main that
+# changes the version in pyproject.toml, if the version has no tag yet and is
+# greater than every release.
+
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+    branches: [main]
+
+permissions: {}
+
+# One group per commit, so that a run waiting for another is never dropped.
+concurrency:
+  group: release-${{ github.event.workflow_run.head_sha }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    if: >-
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.event == 'push' &&
+      github.event.workflow_run.head_repository.full_name == github.repository
+    permissions:
+      contents: write
+    uses: ./.github/workflows/release.yml
+    with:
+      sha: ${{ github.event.workflow_run.head_sha }}
+      version-file: pyproject.toml

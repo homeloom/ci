@@ -1,0 +1,43 @@
+name: Python lint
+
+# Ruff lint and format check, using the configuration of the calling
+# repository (pyproject.toml or ruff.toml).
+
+on:
+  workflow_call:
+    inputs:
+      path:
+        description: Directory to lint.
+        type: string
+        default: .
+
+permissions: {}
+
+jobs:
+  lint:
+    name: Lint
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - name: Check out
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install ruff
+        uses: $/actions/setup-tools
+        with:
+          tools: ruff
+
+      - name: Lint
+        env:
+          TARGET: ${{ inputs.path }}
+        run: ruff check --output-format=github "$TARGET"
+
+      - name: Check formatting
+        if: ${{ !cancelled() }}
+        env:
+          TARGET: ${{ inputs.path }}
+        run: ruff format --check --diff "$TARGET"

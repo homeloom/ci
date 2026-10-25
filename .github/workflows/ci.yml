@@ -1,0 +1,182 @@
+name: CI
+
+# CI of this repository. It calls the reusable workflows from the same
+# commit, so a change to a workflow is tested by the pull request that makes it.
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review, edited]
+  push:
+    branches: [main]
+  # A run started by hand checks the whole history as new.
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# One group per pull request, where a new push cancels the previous run, and
+# one per commit on main, where every commit must be checked.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  # Runs on drafts too: it is fast, and finds personal data as soon as it is pushed.
+  hygiene:
+    uses: ./.github/workflows/hygiene.yml
+    permissions:
+      contents: read
+      # The hygiene job reads the current pull request title and body.
+      pull-requests: read
+    with:
+      # Session links and the noreply commit address of the AI coding assistant
+      # that contributes to this repository.
+      allowed-domains: anthropic.com claude.ai claude.com
+      # Test data is synthetic and exercises the patterns on purpose.
+      privacy-exclude: tests/*
+      # The language check holds French word lists; its tests use French samples.
+      english-exclude: src/ci_checks/english.py tests/*
+    # Passes every secret: the denylist is the sum of the secrets whose names
+    # start with PRIVACY_DENYLIST, and only the checks' own code reads them.
+    secrets: inherit
+
+  lint:
+    if: github.event.pull_request.draft != true
+    uses: ./.github/workflows/python-lint.yml
+
+  tests:
+    name: Tests
+    if: github.event.pull_request.draft != true
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - name: Check out
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # The checks run on the system Python of the runner, so test on it.
+      - name: Set up Python
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.12"
+
+      # The secret scan tests run gitleaks.
+      - name: Install uv and gitleaks
+        uses: $/actions/setup-tools
+        with:
+          tools: uv gitleaks
+
+      - name: Install test dependencies
+        run: uv pip install --system --require-hashes --requirement requirements-dev.txt
+
+      - name: Run tests
+        run: python -m pytest
+
+      # As in ha-tests.yml: a pragma without a reason excludes nothing but
+      # reads as if it did.
+      - name: Check coverage pragmas
+        if: ${{ !cancelled() }}
+        run: |
+          pragma='#[[:space:]]*(pragma|PRAGMA)[:[:space:]]?[[:space:]]*(no|NO)[[:space:]]*(cover|COVER)'
+          reason="${pragma}[[:space:]]*[-:][[:space:]]*[[:alnum:]]"
+          status=0
+          while IFS= read -r -d '' path && IFS=: read -r number line; do
+            if [[ ! "$line" =~ $reason ]]; then
+              echo "::error::${path}:${number}: give the reason after the pragma, as in \"# pragma: no cover - <reason>\"."
+              status=1
+            fi
+          done < <(git ls-files -z -- '*.py' | xargs -0 --no-run-if-empty grep -nHZE "$pragma" --)
+          exit "$status"
+
+      - name: Install actionlint
+        if: ${{ !cancelled() }}
+        uses: $/actions/setup-tools
+        with:
+          tools: actionlint
+
+      # The templates are not workflows of this repository, so the hygiene job
+      # does not lint them. Their placeholder pins are replaced for the check.
+      - name: Lint workflow templates
+        if: ${{ !cancelled() }}
+        run: |
+          for workflows in templates/*/.github/workflows; do
+            work="${RUNNER_TEMP}/${workflows%%/.github/*}"
+            mkdir -p "$work/.github"
+            cp -r "$workflows" "$work/.github/"
+            sed -i 's/REPLACE_WITH_RELEASE_SHA/0000000000000000000000000000000000000000/' \
+              "$work"/.github/workflows/*.yml
+            (cd "$work" && git init --quiet && actionlint -color)
+          done
+
+  # End to end, on drafts too since it takes seconds: a term from a denylist
+  # secret is caught in a scratch repository, and the report shows where it
+  # is, never the term.
+  planted-term:
+    name: Planted term
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - name: Check out
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Check that a planted term is caught
+        env:
+          CI_SECRETS: '{"PRIVACY_DENYLIST_PLANTED": "Zorblequix"}'
+          PYTHONPATH: ${{ github.workspace }}/src
+        run: |
+          scratch="${RUNNER_TEMP}/planted"
+          log="${RUNNER_TEMP}/planted.log"
+          git init --quiet --initial-branch=main "$scratch"
+          mkdir "$scratch/zorblequix"
+          printf '# Notes\n\nAsk zorblequix.\n' > "$scratch/notes.md"
+          printf 'Nothing here.\n' > "$scratch/zorblequix/list.md"
+          git -C "$scratch" add notes.md zorblequix/list.md
+          git -C "$scratch" -c user.name=ci -c user.email=1+ci@users.noreply.github.com \
+            -c commit.gpgsign=false commit --quiet --message "docs: add notes"
+          echo '{}' > "${RUNNER_TEMP}/event.json"
+          status=0
+          CI_EVENT_PATH="${RUNNER_TEMP}/event.json" \
+            python3 -P -m ci_checks.privacy --root "$scratch" > "$log" 2>&1 || status=$?
+          grep -v '^::add-mask::' "$log" | sed 's/^::error/error/'
+          fail() {
+            echo "::error::$1"
+            exit 1
+          }
+          [[ "$status" -eq 1 ]] || fail "The check exited with ${status} instead of 1."
+          grep -qx '::add-mask::Zorblequix' "$log" || fail "The planted term was not masked."
+          grep -qx '::error file=notes.md,line=3::notes.md:3: denylisted term.' "$log" \
+            || fail "The planted term was not reported at notes.md:3."
+          grep -qx '::error::\[redacted\]/list.md: the file path contains a denylisted term.' "$log" \
+            || fail "The planted term was not redacted from the reported path."
+          if grep -v '^::add-mask::' "$log" | grep -qi 'zorblequix'; then
+            fail "The report printed the planted term."
+          fi
+
+  report:
+    name: Report
+    # Always runs, so that a draft or cancelled run shows a failed Report
+    # rather than a skipped one, which branch protection would count as passed.
+    if: always()
+    needs: [hygiene, lint, tests, planted-term]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 2
+    permissions: {}
+    steps:
+      - name: Check results
+        env:
+          DRAFT: ${{ github.event.pull_request.draft == true }}
+          NEEDS: ${{ toJSON(needs) }}
+        run: |
+          jq -r 'to_entries[] | "\(.key): \(.value.result)"' <<< "$NEEDS"
+          if [[ "$DRAFT" == "true" ]]; then
+            echo "::error::Draft pull request: only the hygiene checks ran. Mark it ready for review to run CI."
+            exit 1
+          fi
+          jq -e 'all(.[]; .result == "success")' <<< "$NEEDS" > /dev/null

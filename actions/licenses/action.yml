@@ -1,0 +1,43 @@
+name: Licenses
+description: >-
+  Require a LICENSE file and check the licenses of the runtime dependencies
+  declared by integration manifests and requirements files.
+inputs:
+  license:
+    description: SPDX identifier the LICENSE file must match.
+    default: MIT
+  requirements:
+    description: Extra runtime requirements files, separated by spaces or commas.
+    default: ""
+  allowed:
+    description: SPDX identifiers that replace the default allowed list.
+    default: ""
+  exceptions:
+    description: Package names exempted after a manual license review.
+    default: ""
+  python-version:
+    description: Python version used to resolve dependencies.
+    default: "3.14"
+runs:
+  using: composite
+  steps:
+    - name: Install uv
+      uses: $/actions/setup-tools
+      with:
+        tools: uv
+    - name: Check licenses
+      shell: bash
+      env:
+        LICENSE_ID: ${{ inputs.license }}
+        REQUIREMENTS: ${{ inputs.requirements }}
+        ALLOWED: ${{ inputs.allowed }}
+        EXCEPTIONS: ${{ inputs.exceptions }}
+        PYTHON_VERSION: ${{ inputs.python-version }}
+        PYTHONPATH: ${{ github.action_path }}/../../src
+      run: >-
+        python3 -P -m ci_checks.licenses
+        --license "$LICENSE_ID"
+        --requirements "$REQUIREMENTS"
+        --allowed "$ALLOWED"
+        --exceptions "$EXCEPTIONS"
+        --python-version "$PYTHON_VERSION"

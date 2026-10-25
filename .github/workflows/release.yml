@@ -1,0 +1,46 @@
+name: Publish release
+
+# Publish a release for a commit of the default branch whose CI passed, when
+# that commit changed the version to one greater than every release. Call it
+# from a workflow triggered by workflow_run after CI completes.
+
+on:
+  workflow_call:
+    inputs:
+      sha:
+        description: Commit to release.
+        type: string
+        required: true
+      version-file:
+        description: File declaring the version. Defaults to the only integration manifest.
+        type: string
+        default: ""
+      changelog:
+        description: Changelog file.
+        type: string
+        default: CHANGELOG.md
+
+permissions: {}
+
+jobs:
+  release:
+    name: Release
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    steps:
+      - name: Check out
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.sha }}
+          # The parent tells whether this commit changed the version.
+          fetch-depth: 2
+          persist-credentials: false
+
+      - name: Publish
+        uses: $/actions/release
+        with:
+          sha: ${{ inputs.sha }}
+          version-file: ${{ inputs.version-file }}
+          changelog: ${{ inputs.changelog }}

@@ -1,0 +1,20 @@
+name: Mask denylist
+description: >-
+  Mask the spellings of each denylisted term in the rest of the job log. Run
+  it as the first step of a job, before the checkout prints branch names.
+inputs:
+  denylist-secrets:
+    description: >-
+      The secrets context as JSON, from the expression toJSON(secrets). Every
+      secret whose name starts with PRIVACY_DENYLIST holds denylisted terms;
+      the others are ignored. Only the masking script receives it.
+    default: "{}"
+runs:
+  using: composite
+  steps:
+    - name: Mask denylisted terms
+      shell: bash
+      env:
+        CI_SECRETS: ${{ inputs.denylist-secrets }}
+        PYTHONPATH: ${{ github.action_path }}/../../src
+      run: python3 -P -m ci_checks.privacy --mask-only

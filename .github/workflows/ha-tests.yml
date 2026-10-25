@@ -1,0 +1,225 @@
+name: Home Assistant tests
+
+# Run pytest with pytest-homeassistant-custom-component against the oldest
+# supported Home Assistant release (the "homeassistant" key of hacs.json) and
+# the latest one, and fail when total coverage is under the threshold.
+#
+# The workflow chooses the versions of homeassistant and
+# pytest-homeassistant-custom-component, so the test requirements file must
+# not pin them.
+#
+# Coverage is measured with the workflow's own configuration: the coverage
+# settings of the repository (.coveragerc, setup.cfg, tox.ini,
+# pyproject.toml) are not read. Only the lines marked with
+# "# pragma: no cover - <reason>", "if TYPE_CHECKING:" blocks and "..."
+# stub bodies are excluded, and a pragma without a reason fails the job.
+
+on:
+  workflow_call:
+    inputs:
+      homeassistant-minimum:
+        description: Oldest supported Home Assistant version. Defaults to the value in hacs.json.
+        type: string
+        default: ""
+      python-minimum:
+        description: Python version used with the oldest Home Assistant version. Home Assistant 2026.3 and later need 3.14.
+        type: string
+        default: "3.13"
+      python-latest:
+        description: Python version used with the latest Home Assistant version.
+        type: string
+        default: "3.14"
+      requirements:
+        description: Test requirements file, installed when it exists.
+        type: string
+        default: requirements_test.txt
+      coverage-source:
+        description: Package or directory measured for coverage, as pytest imports or finds it.
+        type: string
+        default: custom_components
+      coverage-minimum:
+        description: Minimum total coverage, in percent. Lowering it needs a written justification.
+        type: number
+        default: 95
+
+permissions: {}
+
+env:
+  # Without a bound, a minimum version that no release supports makes uv
+  # fall back to a release from 2021, which fails on current Python. 0.13
+  # supports Home Assistant 2023.3 and later, so with this bound resolution
+  # fails instead.
+  PLUGIN: pytest-homeassistant-custom-component>=0.13
+
+jobs:
+  tests:
+    name: Tests (${{ matrix.name }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: minimum
+            python: ${{ inputs.python-minimum }}
+          - name: latest
+            python: ${{ inputs.python-latest }}
+    steps:
+      - name: Check out
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: ${{ matrix.python }}
+
+      - name: Install uv
+        uses: $/actions/setup-tools
+        with:
+          tools: uv
+
+      - name: Select Home Assistant version
+        id: select
+        env:
+          LEG: ${{ matrix.name }}
+          MINIMUM: ${{ inputs.homeassistant-minimum }}
+        run: |
+          : "${PLUGIN:?}"
+          if [[ "$LEG" == "latest" ]]; then
+            echo "spec=${PLUGIN}" >> "$GITHUB_OUTPUT"
+          else
+            if [[ -z "$MINIMUM" ]]; then
+              MINIMUM="$(jq -er '.homeassistant' hacs.json)" || {
+                echo "::error::Set homeassistant-minimum or the homeassistant key of hacs.json."
+                exit 1
+              }
+            fi
+            release="$(curl -fsS --retry 3 --connect-timeout 10 --max-time 60 \
+              "https://pypi.org/pypi/homeassistant/${MINIMUM}/json")"
+            # uv only logs that no solution exists and why; this annotation
+            # also names the input to change.
+            requires="$(jq -r '.info.requires_python // ""' <<< "$release")"
+            python - "$MINIMUM" "$requires" <<'PY'
+          import operator
+          import re
+          import sys
+
+          minimum, requires = sys.argv[1:]
+          compare = {">=": operator.ge, ">": operator.gt, "<=": operator.le, "<": operator.lt}
+          for clause in requires.split(","):
+              match = re.fullmatch(r"\s*(>=|>|<=|<)\s*(\d+(?:\.\d+){0,2})\s*", clause)
+              if not match:
+                  continue
+              wanted = tuple(map(int, match[2].split("."))) + (0,) * (2 - match[2].count("."))
+              if not compare[match[1]](sys.version_info[:3], wanted):
+                  python = ".".join(map(str, sys.version_info[:3]))
+                  print(
+                      f"::error::Home Assistant {minimum} requires Python {requires}, and this "
+                      f"leg runs Python {python}. Set python-minimum to a version that "
+                      "satisfies it (3.14 for Home Assistant 2026.3 and later)."
+                  )
+                  sys.exit(1)
+          PY
+            # Old releases do not pin their transitive dependencies, and newer
+            # ones break them. Resolve as of one week after the release, which
+            # matches what an install of that release had.
+            uploaded="$(jq -er '.urls[0].upload_time_iso_8601' <<< "$release")"
+            echo "spec=homeassistant==${MINIMUM}" >> "$GITHUB_OUTPUT"
+            echo "cutoff=$(date -u -d "${uploaded} + 7 days" +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
+          fi
+          echo "week=$(date -u +%G-%V)" >> "$GITHUB_OUTPUT"
+
+      - name: Cache uv downloads
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/uv
+          key: uv-${{ matrix.name }}-${{ matrix.python }}-${{ steps.select.outputs.week }}-${{ hashFiles(inputs.requirements, 'custom_components/*/manifest.json', 'hacs.json') }}
+          restore-keys: |
+            uv-${{ matrix.name }}-${{ matrix.python }}-
+
+      - name: Install dependencies
+        env:
+          SPEC: ${{ steps.select.outputs.spec }}
+          CUTOFF: ${{ steps.select.outputs.cutoff }}
+          REQUIREMENTS: ${{ inputs.requirements }}
+        run: |
+          runtime="${RUNNER_TEMP}/runtime.txt"
+          shopt -s nullglob
+          manifests=(custom_components/*/manifest.json)
+          if (( ${#manifests[@]} )); then
+            jq -r '.requirements[]?' "${manifests[@]}" > "$runtime"
+          else
+            : > "$runtime"
+          fi
+          args=("$SPEC" "$PLUGIN" --requirement "$runtime")
+          if [[ -f "$REQUIREMENTS" ]]; then
+            args+=(--requirement "$REQUIREMENTS")
+          fi
+          if [[ -n "$CUTOFF" ]]; then
+            # The integration's own requirements are installed at their
+            # current versions, as Home Assistant does at runtime.
+            now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            args+=(--exclude-newer "$CUTOFF")
+            while read -r name; do
+              args+=(--exclude-newer-package "${name}=${now}")
+            done < <(sed -nE 's/^[[:space:]]*([A-Za-z0-9][A-Za-z0-9._-]*).*/\1/p' "$runtime")
+          fi
+          uv pip install --system "${args[@]}"
+          uv pip show --system homeassistant pytest-homeassistant-custom-component | grep -E '^(Name|Version):'
+
+      - name: Run tests
+        env:
+          COVERAGE_SOURCE: ${{ inputs.coverage-source }}
+          COVERAGE_MINIMUM: ${{ inputs.coverage-minimum }}
+        run: |
+          # Passing this file to pytest-cov and coverage means that no coverage
+          # setting of the repository is read. A bare --cov makes pytest-cov
+          # measure the source of this file only, whatever --cov options the
+          # pytest configuration adds, and the report fails without data, for
+          # example when that configuration adds --no-cov.
+          #
+          # A pragma only excludes code when it gives a reason, with spaces or
+          # tabs as whitespace, so the next step reports every pragma that
+          # excludes nothing. The pragma pattern stays first: on a line of its
+          # own, a pattern starting with "#" would be read as a comment.
+          config="${RUNNER_TEMP}/coverage/coveragerc"
+          mkdir -p "${RUNNER_TEMP}/coverage"
+          cat > "$config" <<EOF
+          [run]
+          data_file = ${RUNNER_TEMP}/coverage/data
+          source = ${COVERAGE_SOURCE}
+          [report]
+          exclude_lines = #[ \t]*(pragma|PRAGMA)[: \t]?[ \t]*(no|NO)[ \t]*(cover|COVER)[ \t]*[-:][ \t]*[A-Za-z0-9]
+              ^[ \t]*if[ \t]+(typing\.)?TYPE_CHECKING[ \t]*:
+              ^[ \t]*\.\.\.[ \t]*(#.*)?$
+          precision = 2
+          show_missing = true
+          skip_covered = true
+          EOF
+          python -m pytest --cov --cov-config="$config" --cov-report=
+          python -m coverage report --rcfile="$config" --fail-under="$COVERAGE_MINIMUM"
+
+      # A pragma without a reason excludes nothing but reads as if it did. The
+      # coverage source can be a package anywhere, so every Python file of the
+      # repository is checked.
+      - name: Check coverage pragmas
+        if: ${{ !cancelled() }}
+        run: |
+          pragma='#[[:space:]]*(pragma|PRAGMA)[:[:space:]]?[[:space:]]*(no|NO)[[:space:]]*(cover|COVER)'
+          reason="${pragma}[[:space:]]*[-:][[:space:]]*[[:alnum:]]"
+          status=0
+          while IFS= read -r -d '' path && IFS=: read -r number line; do
+            if [[ ! "$line" =~ $reason ]]; then
+              echo "::error::${path}:${number}: give the reason after the pragma, as in \"# pragma: no cover - <reason>\"."
+              status=1
+            fi
+          done < <(git ls-files -z -- '*.py' | xargs -0 --no-run-if-empty grep -nHZE "$pragma" --)
+          exit "$status"
+
+      - name: Prune uv cache
+        if: always()
+        run: uv cache prune --ci

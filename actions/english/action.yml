@@ -1,0 +1,28 @@
+name: English
+description: >-
+  Reject French text outside translation files, in pull request text and in
+  the messages of new commits. Needs a checkout with fetch-depth 0.
+inputs:
+  denylist-secrets:
+    description: >-
+      The secrets context as JSON, from the expression toJSON(secrets). Every
+      secret whose name starts with PRIVACY_DENYLIST holds denylisted terms;
+      the others are ignored. File paths that hold one are redacted.
+    default: "{}"
+  exclude:
+    description: Globs of files to skip, separated by spaces or commas.
+    default: ""
+  allowed-words:
+    description: Words accepted as English, such as brand names (hyphenated ones included), separated by spaces or commas.
+    default: ""
+runs:
+  using: composite
+  steps:
+    - name: Check language
+      shell: bash
+      env:
+        CI_SECRETS: ${{ inputs.denylist-secrets }}
+        EXCLUDE: ${{ inputs.exclude }}
+        ALLOWED_WORDS: ${{ inputs.allowed-words }}
+        PYTHONPATH: ${{ github.action_path }}/../../src
+      run: python3 -P -m ci_checks.english --exclude "$EXCLUDE" --allowed-words "$ALLOWED_WORDS"

@@ -1,0 +1,67 @@
+name: Privacy
+description: >-
+  Scan the files, the commits and the pull request text for secrets and
+  personal data. Needs a checkout with fetch-depth 0.
+inputs:
+  denylist-secrets:
+    description: >-
+      The secrets context as JSON, from the expression toJSON(secrets). Every
+      secret whose name starts with PRIVACY_DENYLIST holds denylisted terms;
+      the others are ignored. Only the scripts of this action receive it;
+      they remove it from their environment before running gitleaks.
+    default: "{}"
+  allowed-domains:
+    description: Extra domains allowed in URLs, separated by spaces or commas.
+    default: ""
+  exclude:
+    description: Globs of files skipped by the generic patterns (never by the denylist or gitleaks).
+    default: ""
+  require-denylist:
+    description: >-
+      Fail when no denylist secret holds a term. Pull requests from forks
+      never receive secrets, so with this set they always fail.
+    default: "true"
+  secrets-ignore:
+    description: >-
+      Fingerprints of known gitleaks false positives already in the history
+      of the base branch, one per line, as commit:path:rule:line (with an
+      empty path for a commit message). Each ignored finding is reported as a
+      warning.
+    default: ""
+runs:
+  using: composite
+  steps:
+    # The personal data scan runs first: it masks the denylisted terms for
+    # every later step of the job, including the gitleaks report.
+    - name: Scan for personal data
+      shell: bash
+      env:
+        CI_SECRETS: ${{ inputs.denylist-secrets }}
+        ALLOWED_DOMAINS: ${{ inputs.allowed-domains }}
+        EXCLUDE: ${{ inputs.exclude }}
+        REQUIRE_DENYLIST: ${{ inputs.require-denylist }}
+        PYTHONPATH: ${{ github.action_path }}/../../src
+      run: >-
+        python3 -P -m ci_checks.privacy
+        --allowed-domains "$ALLOWED_DOMAINS"
+        --exclude "$EXCLUDE"
+        --require-denylist "$REQUIRE_DENYLIST"
+    - name: Install gitleaks
+      if: ${{ !cancelled() }}
+      uses: $/actions/setup-tools
+      with:
+        tools: gitleaks
+    # gitleaks reads every commit of the history, then the commit messages,
+    # the pull request text and the files it cannot read in a diff.
+    - name: Scan for secrets
+      if: ${{ !cancelled() }}
+      shell: bash
+      env:
+        CI_SECRETS: ${{ inputs.denylist-secrets }}
+        CONFIG: ${{ github.action_path }}/gitleaks.toml
+        SECRETS_IGNORE: ${{ inputs.secrets-ignore }}
+        PYTHONPATH: ${{ github.action_path }}/../../src
+      run: >-
+        python3 -P -m ci_checks.secrets
+        --config "$CONFIG"
+        --ignore "$SECRETS_IGNORE"

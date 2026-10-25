@@ -1,0 +1,77 @@
+name: CI
+
+# CI of a Home Assistant integration, built from the shared workflows of
+# homeloom/ci. Branch protection requires the Report job.
+#
+# Draft pull requests only run the hygiene checks, which take seconds and find
+# personal data as soon as it is pushed; Report then fails to show that CI has
+# not fully run. Marking the pull request ready for review runs CI once.
+# Editing the title or body runs it again, because the title becomes the
+# commit message and both are checked for personal data.
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review, edited]
+  push:
+    branches: [main]
+  # A run started by hand checks the whole history as new.
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# One group per pull request, where a new push cancels the previous run, and
+# one per commit on main, where every commit must be checked.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  # Runs on drafts too: it is fast, and finds personal data as soon as it is pushed.
+  hygiene:
+    uses: homeloom/ci/.github/workflows/hygiene.yml@REPLACE_WITH_RELEASE_SHA # vX.Y.Z
+    permissions:
+      contents: read
+      # The hygiene job reads the current pull request title and body.
+      pull-requests: read
+    with:
+      # Session links and noreply commit addresses of AI coding assistants.
+      # Keep only the domains of the assistants that contribute.
+      allowed-domains: anthropic.com claude.ai claude.com
+    # Passes every secret: the denylist is the sum of the secrets whose names
+    # start with PRIVACY_DENYLIST, and only the checks' own code reads them.
+    secrets: inherit
+
+  lint:
+    if: github.event.pull_request.draft != true
+    uses: homeloom/ci/.github/workflows/python-lint.yml@REPLACE_WITH_RELEASE_SHA # vX.Y.Z
+
+  tests:
+    if: github.event.pull_request.draft != true
+    uses: homeloom/ci/.github/workflows/ha-tests.yml@REPLACE_WITH_RELEASE_SHA # vX.Y.Z
+
+  validate:
+    if: github.event.pull_request.draft != true
+    uses: homeloom/ci/.github/workflows/ha-integration.yml@REPLACE_WITH_RELEASE_SHA # vX.Y.Z
+
+  report:
+    name: Report
+    # Always runs, so that a draft or cancelled run shows a failed Report
+    # rather than a skipped one, which branch protection would count as passed.
+    if: always()
+    needs: [hygiene, lint, tests, validate]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 2
+    permissions: {}
+    steps:
+      - name: Check results
+        env:
+          DRAFT: ${{ github.event.pull_request.draft == true }}
+          NEEDS: ${{ toJSON(needs) }}
+        run: |
+          jq -r 'to_entries[] | "\(.key): \(.value.result)"' <<< "$NEEDS"
+          if [[ "$DRAFT" == "true" ]]; then
+            echo "::error::Draft pull request: only the hygiene checks ran. Mark it ready for review to run CI."
+            exit 1
+          fi
+          jq -e 'all(.[]; .result == "success")' <<< "$NEEDS" > /dev/null

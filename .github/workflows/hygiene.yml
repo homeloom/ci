@@ -1,0 +1,162 @@
+name: Hygiene
+
+# Checks that apply to every repository. Pull request title, secrets and
+# personal data, language and workflow syntax share one job to save runner
+# minutes; every step runs even when an earlier one fails, so a single run
+# reports every problem. The license check installs third party packages,
+# which may run their build code, so it runs in its own job that never
+# receives a secret.
+#
+# The denylist is the sum of every secret whose name starts with
+# PRIVACY_DENYLIST, so lists can be added without changing any workflow.
+# GitHub cannot pass secrets by a name pattern, so callers pass all of them
+# with `secrets: inherit`. Only the steps that run the checks' own
+# Python code receive them, as the JSON of the secrets context in an input;
+# that code keeps the PRIVACY_DENYLIST* values and drops the variable before
+# it starts any subprocess. No third party tool or action sees the secrets,
+# and the checks never print them. GitHub shows the secrets context in the
+# step headers with every value masked but every name visible, so the
+# names of all the secrets the caller can see must stay neutral, and the
+# denylists are numbered (PRIVACY_DENYLIST_1, PRIVACY_DENYLIST_2...).
+#
+# Callers run this workflow on draft pull requests too: it takes seconds,
+# and personal data must be found as soon as it is pushed.
+
+on:
+  workflow_call:
+    inputs:
+      allowed-domains:
+        description: Extra domains allowed in URLs.
+        type: string
+        default: ""
+      privacy-exclude:
+        description: Globs of files skipped by the generic personal data patterns.
+        type: string
+        default: ""
+      require-denylist:
+        description: Fail when no secret whose name starts with PRIVACY_DENYLIST holds a term.
+        type: boolean
+        default: true
+      secrets-ignore:
+        description: >-
+          Fingerprints (commit:path:rule:line) of known gitleaks false
+          positives already on the base branch, one per line.
+        type: string
+        default: ""
+      english-exclude:
+        description: Globs of files skipped by the language check.
+        type: string
+        default: ""
+      english-allowed-words:
+        description: Words the language check accepts, such as accented brand names.
+        type: string
+        default: ""
+      license:
+        description: SPDX identifier the LICENSE file must match.
+        type: string
+        default: MIT
+      license-requirements:
+        description: Extra runtime requirements files whose licenses are checked.
+        type: string
+        default: ""
+      license-allowed:
+        description: SPDX identifiers that replace the default allowed list.
+        type: string
+        default: ""
+      license-exceptions:
+        description: Package names exempted after a manual license review.
+        type: string
+        default: ""
+
+permissions: {}
+
+jobs:
+  hygiene:
+    name: Hygiene
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      # To read the current pull request title and body.
+      pull-requests: read
+    steps:
+      # Before the checkout, which prints the name of every branch.
+      - name: Mask denylisted terms
+        uses: $/actions/mask-denylist
+        with:
+          denylist-secrets: ${{ toJSON(secrets) }}
+
+      - name: Check out
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      # A run that is started again keeps the event of its first attempt,
+      # whose title and body may have been edited since. The checks read a
+      # copy of the event with the current text.
+      - name: Read the current pull request text
+        if: github.event_name == 'pull_request'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PULL: ${{ github.event.pull_request.number }}
+        run: |
+          pull="${RUNNER_TEMP}/pull-request.json"
+          event="${RUNNER_TEMP}/event.json"
+          gh api "repos/${GITHUB_REPOSITORY}/pulls/${PULL}" > "$pull"
+          jq --slurpfile pull "$pull" \
+            '.pull_request.title = $pull[0].title | .pull_request.body = $pull[0].body' \
+            "$GITHUB_EVENT_PATH" > "$event"
+          echo "CI_EVENT_PATH=${event}" >> "$GITHUB_ENV"
+
+      - name: Pull request title
+        if: github.event_name == 'pull_request'
+        uses: $/actions/pr-title
+
+      - name: Privacy
+        if: ${{ !cancelled() }}
+        uses: $/actions/privacy
+        with:
+          denylist-secrets: ${{ toJSON(secrets) }}
+          allowed-domains: ${{ inputs.allowed-domains }}
+          exclude: ${{ inputs.privacy-exclude }}
+          require-denylist: ${{ inputs.require-denylist }}
+          secrets-ignore: ${{ inputs.secrets-ignore }}
+
+      - name: English
+        if: ${{ !cancelled() }}
+        uses: $/actions/english
+        with:
+          denylist-secrets: ${{ toJSON(secrets) }}
+          exclude: ${{ inputs.english-exclude }}
+          allowed-words: ${{ inputs.english-allowed-words }}
+
+      - name: Install actionlint
+        if: ${{ !cancelled() }}
+        uses: $/actions/setup-tools
+        with:
+          tools: actionlint
+
+      - name: Lint workflows
+        if: ${{ !cancelled() }}
+        run: actionlint -color
+
+  licenses:
+    name: Licenses
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - name: Check out
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Licenses
+        uses: $/actions/licenses
+        with:
+          license: ${{ inputs.license }}
+          requirements: ${{ inputs.license-requirements }}
+          allowed: ${{ inputs.license-allowed }}
+          exceptions: ${{ inputs.license-exceptions }}
