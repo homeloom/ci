@@ -15,6 +15,7 @@ import html
 import json
 import re
 import unicodedata
+from collections import Counter
 from collections.abc import Iterable, Iterator, MutableMapping
 from itertools import pairwise, product
 from pathlib import PurePosixPath
@@ -320,14 +321,16 @@ class Denylist:
             views = [(self._pattern, False, normalize(source))]
             if self._long and _CAMEL.search(source):
                 views.append((self._long, True, normalize(_CAMEL.sub(" ", source))))
-            # Entities are only told apart by their case, which folding loses,
-            # so an entity counts when each of its spellings in the text as
-            # written decodes.
-            spellings: dict[str, bool] = {}
-            for entity in _ENTITY.findall(source):
-                key = normalize(entity)
-                spellings[key] = spellings.get(key, True) and html.unescape(entity) != entity
-            entities = {key for key, decodes in spellings.items() if decodes}
+            # Folding merges entities that differ by case, accents or invisible
+            # characters, so an entity of the folded text counts only when
+            # each of its occurrences comes from one that decodes as written.
+            decoding = Counter(
+                normalize(entity)
+                for entity in _ENTITY.findall(source)
+                if html.unescape(entity) != entity
+            )
+            occurrences = Counter(_ENTITY.findall(views[0][2]))
+            entities = {key for key, count in decoding.items() if occurrences[key] == count}
             for pattern, long_only, folded in views:
                 view += 1
                 singles = self._singles[long_only]
@@ -436,9 +439,10 @@ class Denylist:
 def _next_to_escape(folded: str, match: re.Match[str], entities: set[str]) -> bool:
     """Return whether an escape that decodes touches a match.
 
-    Entities count when they are among those of the text that decode. An
-    escape cut short before the match, after at least one digit, counts when
-    the first letters of the match are the hexadecimal digits it is missing.
+    Entities count when they are in entities, the folded entities whose
+    every occurrence decodes as written. An escape cut short before the
+    match, after at least one digit, counts when the first letters of the
+    match are the hexadecimal digits it is missing.
     """
     before = folded[max(0, match.start() - 40) : match.start()]
     for escape in (_ESCAPE_BEFORE.search(before), _ESCAPE_AFTER.match(folded, match.end())):
