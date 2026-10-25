@@ -239,10 +239,12 @@ def test_fiction_phone_blocks_are_exempt_and_nothing_next_to_them(block: str) ->
     for end in ("0000", "9999"):
         number = (digits + end)[:length]
         assert privacy.generic_findings(f"call +{number[:2]} {number[2:]}", ALLOWED) == []
-    # The first number of the next block, built here and written nowhere.
-    following = str(int(digits) + 1)
-    number = following + "0" * (length - len(following))
-    assert "phone" in privacy.generic_findings(f"call +{number[:2]} {number[2:]}", ALLOWED)
+    # The last number of the block before and the first of the block after,
+    # built here and written nowhere.
+    before = str(int(digits) - 1)
+    after = str(int(digits) + 1)
+    for number in (before.ljust(length, "9"), after.ljust(length, "0")):
+        assert "phone" in privacy.generic_findings(f"call +{number[:2]} {number[2:]}", ALLOWED)
 
 
 def test_extra_allowed_domain() -> None:

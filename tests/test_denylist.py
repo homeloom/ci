@@ -293,6 +293,8 @@ def test_glued_terms_after_complete_escapes(text: str) -> None:
         "R&Deg;Zorblequix",
         "Zorblequix&Ltd;",
         "Zorblequix&Notes;",
+        # Even when the text also writes them in the case that decodes.
+        "&Hat; &amp;Hat;\nZorblequix&hat;",
         # Partial escapes that the next letters do not complete.
         "\\x1Zorblequix",
         "%2Zorblequix",

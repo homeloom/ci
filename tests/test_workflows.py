@@ -278,6 +278,7 @@ def test_minimum_leg_installs_the_bounded_plugin(repo: Repo, tmp_path: Path) -> 
             "PLUGIN": "zorbleplugin>=9",
         },
     )
+    finished = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
     assert result.returncode == 0, result.stdout + result.stderr
     install = calls.read_text(encoding="utf-8").splitlines()[0].split()
     assert install[:5] == [
@@ -292,4 +293,4 @@ def test_minimum_leg_installs_the_bounded_plugin(repo: Repo, tmp_path: Path) -> 
     # The integration's own requirements are resolved as of now.
     name, cutoff = install[install.index("--exclude-newer-package") + 1].split("=")
     assert name == "zorblelib"
-    assert cutoff >= started
+    assert started <= cutoff <= finished

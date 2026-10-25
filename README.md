@@ -96,20 +96,19 @@ followed by a `Last` that starts the next. A camel case term such as
 `FirstLast` matches the same spellings. Terms of five letters and digits or
 more also match as a part of a camel case name, such as `getFirstLast`, and,
 unless they are spelled only with hexadecimal digits, next to digits, such as
-`FirstLast2`. Numbers follow stricter rules, so that a term with numbers is
-not found in a longer number or version, in a list or in a key and its value:
-a number never touches another digit or a dot followed by a digit, two numbers
-are separated by exactly one space, dot, dash or underscore, a word and the
-number after it by anything but a comma or a colon, and a number and the word
-after it by anything but a colon. So `12.3.0` matches `12 3 0` and `12_3_0`,
-but not `2026-12-30`, `12:30`, `1230`, `[12, 3, 0]` or `v1.12.3.0`, and
-`step 12` does not match `"step": 12`. A term always matches as it is
-written, so `03/12/1985` and `12, Quillmore Street` match themselves. Text
-that writes characters as escapes (`\u00e9`, `\x41`, `\n`, `%20`,
-`&eacute;`) is also matched decoded. List only terms that never belong in a
-repository: not the GitHub usernames of maintainers, which appear in noreply
-addresses and attributions, and not common words, which also match inside
-names such as `max_value`, since the denylist has no exceptions.
+`FirstLast2`. Numbers follow stricter rules: a number never touches another
+digit or a dot followed by a digit, two numbers are separated by exactly one
+space, dot, dash or underscore, a word and the number after it by anything but
+a comma or a colon, and a number and the word after it by anything but a
+colon. So `12.3.0` matches `12 3 0` and `12_3_0`, but not `2026-12-30`,
+`12:30`, `1230`, `[12, 3, 0]` or `v1.12.3.0`, and `step 12` does not match
+`"step": 12`. A term always matches as it is written, so `03/12/1985` and
+`12, Quillmore Street` match themselves. Text that writes characters as
+escapes (`\u00e9`, `\x41`, `\n`, `%20`, `&eacute;`) is also matched decoded.
+List only terms that never belong in a repository: not the GitHub usernames
+of maintainers, which appear in noreply addresses and attributions, and not
+common words, which also match inside names such as `max_value`, since the
+denylist has no exceptions.
 
 The first step of the job masks the common spellings of each term (as
 written, in lower, upper and title case, without accents, with spaces,

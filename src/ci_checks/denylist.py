@@ -321,12 +321,13 @@ class Denylist:
             if self._long and _CAMEL.search(source):
                 views.append((self._long, True, normalize(_CAMEL.sub(" ", source))))
             # Entities are only told apart by their case, which folding loses,
-            # so those that decode are taken from the text as written.
-            entities = {
-                normalize(entity)
-                for entity in _ENTITY.findall(source)
-                if html.unescape(entity) != entity
-            }
+            # so an entity counts when each of its spellings in the text as
+            # written decodes.
+            spellings: dict[str, bool] = {}
+            for entity in _ENTITY.findall(source):
+                key = normalize(entity)
+                spellings[key] = spellings.get(key, True) and html.unescape(entity) != entity
+            entities = {key for key, decodes in spellings.items() if decodes}
             for pattern, long_only, folded in views:
                 view += 1
                 singles = self._singles[long_only]
