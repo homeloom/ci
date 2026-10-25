@@ -9,7 +9,10 @@ Two kinds of checks run:
   `ci-allow: <category>` comment, and paths can be excluded with globs.
 * A denylist of terms, one per line, merged from every secret whose name
   starts with PRIVACY_DENYLIST (see ci_checks.denylist.denylist_sources).
-  It applies everywhere and cannot be opted out of.
+  It applies everywhere and cannot be opted out of. GitHub prints the names
+  of the secrets in the step headers, with their values masked, so the
+  denylists are numbered (PRIVACY_DENYLIST_1, PRIVACY_DENYLIST_2...) and
+  their names never say what they hold.
 
 What is scanned:
 
@@ -904,7 +907,10 @@ def mask_terms(denylist: Denylist) -> Iterator[str]:
 def check_denylist_sources(sources: list[str], pr: PullRequest | None, reporter: Reporter) -> None:
     """Fail when no denylist holds a term, and warn about empty ones.
 
-    Only counts are printed, never a name or a term.
+    Only counts are printed, never a name or a term. GitHub itself prints
+    the names of the secrets in the step headers, with their values masked,
+    which is why the denylists are numbered rather than named after what
+    they hold.
     """
     empty = sum(1 for raw in sources if not Denylist(raw))
     if empty < len(sources):

@@ -100,13 +100,19 @@ unless they are spelled only with hexadecimal digits, next to digits, such as
 digit or a dot followed by a digit, two numbers are separated by exactly one
 space, dot, dash or underscore, a word and the number after it by anything but
 a comma or a colon, and a number and the word after it by anything but a
-colon. So `12.3.0` matches `12 3 0` and `12_3_0`, but not `2026-12-30`,
-`12:30`, `1230`, `[12, 3, 0]` or `v1.12.3.0`, and `step 12` does not match
+colon. A term that starts or ends with two numbers is not found inside a
+longer run of numbers, such as the coordinates of an SVG path. Terms of eight
+digits or more, such as phone numbers, also match with their numbers glued or
+separated by any run of spaces, any dash or a line break, and two numbers that
+a term separates with a comma may have spaces around it or none. So `12.3.0`
+matches `12 3 0` and `12_3_0`, but not `2026-12-30`, `12:30`, `1230`,
+`[12, 3, 0]`, `v1.12.3.0` or `matrix(12 3 0 1 5 5)`, `06 39 98 12 34` also
+matches `0639981234` and `06–39–98–12–34`, and `step 12` does not match
 `"step": 12`. A term always matches as it is written, so `03/12/1985` and
 `12, Quillmore Street` match themselves. Text that writes characters as
 escapes (`\u00e9`, `\x41`, `\n`, `%20`, `&eacute;`) is also matched decoded.
-List only terms that never belong in a repository: not the GitHub usernames
-of maintainers, which appear in noreply addresses and attributions, and not
+List only terms that never belong in a repository: not the GitHub usernames of
+maintainers, which appear in noreply addresses and attributions, and not
 common words, which also match inside names such as `max_value`, since the
 denylist has no exceptions.
 

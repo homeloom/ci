@@ -241,6 +241,90 @@ def test_terms_with_numbers_keep_their_limits(term: str, text: str) -> None:
     assert not Denylist(term).matches(text)
 
 
+@pytest.mark.parametrize(
+    ("term", "text"),
+    [
+        # Coordinates in SVG paths and transforms are runs of numbers.
+        ("12.3.0", "matrix(12 3 0 1 5 5)"),
+        ("4.7.21", "matrix(4 7 21 0 0)"),
+        ("4.7.21", "matrix(0 4 7 21 0)"),
+        ("4.7.21", 'points="4 7 21 3 3"'),
+        ("4.7.21", "path 2_4_7_21"),
+    ],
+)
+def test_numbers_inside_a_longer_run_of_numbers(term: str, text: str) -> None:
+    assert not Denylist(term).matches(text)
+
+
+def test_terms_next_to_a_single_number() -> None:
+    # Only a term that starts or ends with two numbers is part of a run.
+    assert Denylist("bus 917").matches("bus 917 2 stops")
+    assert Denylist("12.3.0").matches("(12 3 0) and 4")
+    assert Denylist("4.7.21").matches("version 4.7.21, build 9")
+
+
+LONG_NUMBERS = Denylist("06 39 98 12 34\n3e:22:fb:12:34:56")
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "0639981234",
+        "06\N{EN DASH}39\N{EN DASH}98\N{EN DASH}12\N{EN DASH}34",
+        "06\N{MINUS SIGN}39\N{EM DASH}98-12_34",
+        "06  39 98 12 34",
+        "06\N{NO-BREAK SPACE}39\N{NARROW NO-BREAK SPACE}98 12 34",
+        "06 39 98\n    12 34",
+        "06 39 98 \r\n\t12 34",
+        "06.39.98.12.34",
+        "3e22fb123456",
+        "3e22.fb12.3456",
+        "3E-22-FB-12-34-56",
+    ],
+)
+def test_long_numbers_match_their_usual_spellings(text: str) -> None:
+    assert LONG_NUMBERS.matches(text)
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "106399812345",
+        "06 39 98 12 345",
+        "06 39 98 12 34 56",
+        "06 39 98 / 12 34",
+        "06 39 98\n\n12 34",
+        "06 - 39 98 12 34",
+    ],
+)
+def test_long_numbers_keep_their_limits(text: str) -> None:
+    assert not LONG_NUMBERS.matches(text)
+
+
+@pytest.mark.parametrize("text", ["12  3 0", "12\N{EN DASH}3\N{EN DASH}0", "12 3\n0", "1230"])
+def test_short_numbers_keep_the_strict_rule(text: str) -> None:
+    assert not Denylist("12.3.0").matches(text)
+
+
+@pytest.mark.parametrize(
+    ("term", "text"),
+    [
+        ("32.87336, -117.22743", "32.87336,-117.22743"),
+        ("32.87336, -117.22743", "geo:32.87336,-117.22743"),
+        ("32.87336, -117.22743", "center: [32.87336 , -117.22743]"),
+        ("32.87336,-117.22743", "32.87336, -117.22743"),
+        ("12,5", "12 , 5"),
+    ],
+)
+def test_numbers_separated_by_a_comma(term: str, text: str) -> None:
+    assert Denylist(term).matches(text)
+
+
+def test_numbers_separated_by_a_comma_keep_the_rest_of_the_separator() -> None:
+    assert not Denylist("32.87336, -117.22743").matches("32.87336, 117.22743")
+    assert not Denylist("12.3.0").matches("12, 3, 0")
+
+
 def test_terms_are_grouped_by_their_first_character() -> None:
     denylist = Denylist("Zorble\nzorblequix\n12 rue Quillmore\n192.0.2.47\n-Bluefinch-\n#x\n!!!")
     text = "a zorble, 192.0.2.47, ZORBLEQUIX and 12 rue quillmore; bluefinch\n"
@@ -257,6 +341,15 @@ def test_terms_with_many_numbers_fail_fast() -> None:
         assert not denylist.matches(near)
     assert time.perf_counter() - start < 1
     assert denylist.matches(" ".join(words))
+    numbers = [str(10 + i) for i in range(20)]
+    denylist = Denylist(" ".join(numbers))
+    start = time.perf_counter()
+    for separator in (" ", "  ", "\n  ", ""):
+        near = separator.join(numbers[:-1]) + separator + "99"
+        for _ in range(100):
+            assert not denylist.matches(near * 20)
+    assert time.perf_counter() - start < 1
+    assert denylist.matches("  ".join(numbers))
 
 
 def test_a_term_that_extends_another_is_found_whole() -> None:

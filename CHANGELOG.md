@@ -34,7 +34,9 @@ All notable changes to this project are documented here. The format follows
   another Python than `python-minimum`.
 - Denylist matching that ignores case, accents and separators between the
   words of a term, with stricter rules for numbers, so that versions such as
-  `v1.12.3.0` and lists such as `[12, 3, 0]` do not match the term `12 3 0`.
+  `v1.12.3.0`, lists such as `[12, 3, 0]` and SVG coordinates do not match
+  the term `12 3 0`, while phone numbers and other terms of eight digits or
+  more also match their usual spellings.
 - Composite actions for each check, and a tool installer that verifies
   SHA-256 digests.
 - Templates for new repositories: license, security policy, contribution

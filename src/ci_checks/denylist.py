@@ -3,10 +3,11 @@
 Matching ignores case, accents and invisible characters, respects word
 boundaries, and lets the words of a term be separated by any punctuation,
 underscores or line breaks. Numbers follow stricter rules, so that versions
-such as "v1.12.3.0" and lists such as "[12, 3, 0]" do not match the term
-"12 3 0". Text that writes characters as escapes (\\u, \\x and \\n
-escapes, percent-encoding or HTML entities) is also matched as it reads
-once decoded.
+such as "v1.12.3.0", lists such as "[12, 3, 0]" and SVG coordinates do not
+match the term "12 3 0", while phone numbers and other terms of eight digits
+or more also match their usual spellings. Text that writes characters as
+escapes (\\u, \\x and \\n escapes, percent-encoding or HTML entities) is
+also matched as it reads once decoded.
 """
 
 from __future__ import annotations
@@ -76,11 +77,16 @@ _CAMEL = re.compile(r"(?<=[a-z\xdf-\xf6\xf8-\xff])(?=[A-Z\xc0-\xd6\xd8-\xde])")
 # or a mapping: "step 12" does not match '"step": 12'. After a number, no
 # colon, but a comma, as in "12, Main Street". Between two numbers, exactly
 # one space, dot, dash or underscore, so that "12 3 0" does not match
-# "2026-12-30", "12:30", "1230" or numbers listed one per line.
+# "2026-12-30", "12:30", "1230" or numbers listed one per line. In terms of
+# eight digits or more, such as phone numbers, the numbers may also be
+# glued or separated by any run of spaces, any dash, or a line break and
+# its indentation, the ways such numbers are written.
 _LETTERS_GAP = r"[\W_]*"
 _BEFORE_NUMBER_GAP = r"(?:[^\w,:]|_)*"
 _AFTER_NUMBER_GAP = r"(?:[^\w:]|_)*"
 _NUMBERS_GAP = r"[ ._-]"
+_LONG_NUMBERS_GAP = r"(?:[ \t]++(?:\r?\n[ \t]*+)?|\r?\n[ \t]*+|[._\-\u2010-\u2015\u2212])?"
+LONG_NUMBER_DIGITS = 8
 _SEPARATORS = re.compile(r"[\W_]+")
 # The digits of hexadecimal numbers: hashes spell terms made only of them.
 _HEX_DIGITS = frozenset("0123456789abcdef")
@@ -161,13 +167,21 @@ def _term_pattern(words: list[str], separators: list[str], glued: bool) -> str:
 
     A term never touches a letter. Where it starts or ends with a number, it
     touches no digit either, nor a dot followed by a digit, as in a longer
-    version or address. Where it starts or ends with a letter, a glued term
-    may touch digits, as in "name42" or "v2name".
+    version or address. Where it starts or ends with two numbers, it is not
+    part of a longer run of numbers either, as in the coordinates of an SVG
+    path. Where it starts or ends with a letter, a glued term may touch
+    digits, as in "name42" or "v2name".
     """
+    numbers_gap = (
+        _LONG_NUMBERS_GAP
+        if sum(map(str.isdecimal, "".join(words))) >= LONG_NUMBER_DIGITS
+        else _NUMBERS_GAP
+    )
     pattern = re.escape(words[0])
     for (before, word), own in zip(pairwise(words), separators, strict=True):
-        if before[-1].isdecimal() and word[0].isdecimal():
-            gap = _NUMBERS_GAP
+        between_numbers = before[-1].isdecimal() and word[0].isdecimal()
+        if between_numbers:
+            gap = numbers_gap
         elif before[-1].isdecimal():
             gap = _AFTER_NUMBER_GAP
         elif word[0].isdecimal():
@@ -177,15 +191,25 @@ def _term_pattern(words: list[str], separators: list[str], glued: bool) -> str:
         if gap != _LETTERS_GAP and not re.fullmatch(gap, own):
             # A term always matches as it is written. A separator that the
             # gap already accepts is not added, since two ways to match the
-            # same text make a failed match retry every combination.
-            gap = f"(?:{re.escape(own)}|{gap})"
+            # same text make a failed match retry every combination. Two
+            # numbers separated by a comma, as in coordinates, may also have
+            # spaces around it or none.
+            if between_numbers and "," in own:
+                written = r"\s*+,\s*+".join(re.escape(part.strip()) for part in own.split(","))
+            else:
+                written = re.escape(own)
+            gap = f"(?:{written}|{gap})"
         pattern += gap + re.escape(word)
     if words[0][0].isdecimal():
         start = r"(?<![^\W_])(?<!\d\.)"
+        if len(words) > 1 and words[0][-1].isdecimal() and words[1][0].isdecimal():
+            start += r"(?<!\d[ ._-])"
     else:
         start = r"(?<![^\W\d_])" if glued else r"(?<![^\W_])"
     if words[-1][-1].isdecimal():
         end = r"(?![^\W_])(?!\.\d)"
+        if len(words) > 1 and words[-1][0].isdecimal() and words[-2][-1].isdecimal():
+            end += r"(?![ ._-]\d)"
     else:
         end = r"(?![^\W\d_])" if glued else r"(?![^\W_])"
     return start + pattern + end
