@@ -100,8 +100,8 @@ jobs:
             fi
             release="$(curl -fsS --retry 3 --connect-timeout 10 --max-time 60 \
               "https://pypi.org/pypi/homeassistant/${MINIMUM}/json")"
-            # uv would only report that no solution exists, so a Python that
-            # the release excludes is reported here.
+            # uv only logs that no solution exists and why; this annotation
+            # also names the input to change.
             requires="$(jq -r '.info.requires_python // ""' <<< "$release")"
             python - "$MINIMUM" "$requires" <<'PY'
           import operator

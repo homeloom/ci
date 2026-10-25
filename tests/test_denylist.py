@@ -248,6 +248,41 @@ def test_terms_are_grouped_by_their_first_character() -> None:
     assert not denylist.matches("xzorble 1192.0.2.47 192.0.2.470 v192.0.2.47")
 
 
+def test_terms_with_many_numbers_fail_fast() -> None:
+    words = [f"zorble{chr(97 + i)}" if i % 2 == 0 else str(10 + i) for i in range(21)]
+    denylist = Denylist(" ".join(words))
+    near = " ".join(words[:-1]) + " qqq"
+    start = time.perf_counter()
+    for _ in range(100):
+        assert not denylist.matches(near)
+    assert time.perf_counter() - start < 1
+    assert denylist.matches(" ".join(words))
+
+
+def test_a_term_that_extends_another_is_found_whole() -> None:
+    denylist = Denylist("Zorblequix 5G\nZorblequix5G Guest")
+    assert denylist.spans("ssid = Zorblequix5G\nGuest network") == [(1, 2)]
+
+
+@pytest.mark.parametrize(
+    ("term", "text"),
+    [
+        # The first letter of the word completes an escape before it.
+        ("Bluefinch", "q=a%2Bluefinch"),
+        ("Bluefinch", 'name = "\\x2Bluefinch"'),
+        # An escape left after decoding once stands for a letter of the word.
+        ("Finch", '"brand": "Blu\\\\xe9finch"'),
+    ],
+)
+def test_escapes_next_to_glued_terms(term: str, text: str) -> None:
+    assert not Denylist(term).matches(text)
+
+
+@pytest.mark.parametrize("text", ["%20Zorblequix", "%32Zorblequix", "\\x2B Zorblequix"])
+def test_glued_terms_after_complete_escapes(text: str) -> None:
+    assert Denylist("Zorblequix").matches(text)
+
+
 def test_numbers_in_binary_content() -> None:
     assert NUMBERS.matches_binary(b"\x00Code 12.3.0 here\x00")
     assert not NUMBERS.matches_binary(b"\x00DateTime\x002026:12:30 12:30:00\x00")

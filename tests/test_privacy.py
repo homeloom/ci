@@ -33,11 +33,15 @@ def fiction_detected(monkeypatch: pytest.MonkeyPatch) -> None:
     """Report values reserved for fiction and documentation like real ones.
 
     Detection tests use those values, so that no test value can belong to a
-    real person, device or place.
+    real person, device or place. Only the reserved ranges are emptied: the
+    code that applies them still runs.
     """
-    monkeypatch.setattr(privacy, "_is_fiction", lambda _digits: False)
-    monkeypatch.setattr(privacy, "DOCUMENTATION_HARDWARE", ())
+    monkeypatch.setattr(privacy, "FICTION_PHONE_PREFIXES", ())
+    monkeypatch.setattr(privacy, "FICTION_NORTH_AMERICA", ())
+    monkeypatch.setattr(privacy, "DOCUMENTATION_MAC", ())
+    monkeypatch.setattr(privacy, "DOCUMENTATION_EUI64", ())
     monkeypatch.setattr(privacy, "PLACEHOLDER_COORDINATES", set())
+    monkeypatch.setattr(privacy, "RESERVED_DOMAINS", ())
 
 
 @pytest.mark.parametrize(
@@ -56,10 +60,10 @@ def fiction_detected(monkeypatch: pytest.MonkeyPatch) -> None:
         # reserved blocks that are routed but belong to no connection: ORCHIDv2
         # (RFC 7343) and the deprecated 6to4 relay anycast (RFC 7526).
         ("home 2001:20:1f2:3b40::1", "public-ip"),
-        ("contact jane.doe@mail.example-corp.fr", "email"),
-        ("author jane.doe+noreply@mail.example-corp.fr", "email"),
-        ("author noreply@family-domain.fr", "email"),
-        ("idn mail jane@exämple-corp.fr", "email"),
+        ("contact jane.doe@mail.zorble.internal", "email"),
+        ("author jane.doe+noreply@mail.zorble.internal", "email"),
+        ("author noreply@family.internal", "email"),
+        ("idn mail jane@zörble.internal", "email"),
         ("call +33 6 39 98 27 58", "phone"),
         ("call 0033 6 39 98 27 58", "phone"),
         ("call +33\N{NO-BREAK SPACE}6\N{NO-BREAK SPACE}39\N{NO-BREAK SPACE}98 27 58", "phone"),
@@ -69,15 +73,15 @@ def fiction_detected(monkeypatch: pytest.MonkeyPatch) -> None:
         ("call 06.39.98.27.58", "phone"),
         ("call 0639982758", "phone"),
         ("call +44 20 7946 0738", "phone"),
-        ("see https://myhome.example-corp.fr/api", "url"),
+        ("see https://myhome.zorble.internal/api", "url"),
         ("see http://user:pw@nas.lan:8080/x", "url"),
         ("wan http://192.88.99.34:8123/api", "url"),
         ("wan http://[2001:20::1]:8123", "url"),
-        ("ws wss://zorblequix.duckdns.org/api/websocket", "url"),
-        ("cam rtsp://cam.family-domain.net/live", "url"),
-        ("broker mqtt://broker.family-domain.net:1883", "url"),
-        ("idn https://maison-zorblé.fr", "url"),
-        ("footnote https://nas.example-corp.fr\N{SUPERSCRIPT ONE}", "url"),
+        ("ws wss://zorblequix.internal/api/websocket", "url"),
+        ("cam rtsp://cam.family.internal/live", "url"),
+        ("broker mqtt://broker.family.internal:1883", "url"),
+        ("idn https://maison-zorblé.internal", "url"),
+        ("footnote https://nas.zorble.internal\N{SUPERSCRIPT ONE}", "url"),
         ("cd /home/alice/projects", "home-path"),
         ("open /Users/bob/Library", "home-path"),
         (r"C:\Users\carol\Desktop", "home-path"),
@@ -120,6 +124,27 @@ def test_generic_findings_detect(text: str, category: str) -> None:
 
 
 @pytest.mark.parametrize(
+    ("text", "category"),
+    [
+        # Next to the reserved ranges, with the real exemptions: an unassigned
+        # country code (ITU), a North American line outside 555-0100 to
+        # 555-0199, and IANA hardware addresses outside the documentation
+        # ranges. None of them can belong to anyone.
+        ("call +999 41 27 93 58", "phone"),
+        ("call +1-202-555-0243", "phone"),
+        ("mac 00:00:5e:00:54:9d", "mac"),
+        ("mac 00:00:5e:ef:10:9d", "mac"),
+        ("eui 00:00:5e:ef:11:a3:f4:c7", "device-id"),
+        ("eui 00:00:5e:00:53:9d:a3:f4", "device-id"),
+        ('"latitude": 1.23456', "coordinates"),
+        ("see https://nas.zorble.internal/api", "url"),
+    ],
+)
+def test_generic_findings_detect_next_to_reserved_ranges(text: str, category: str) -> None:
+    assert category in privacy.generic_findings(text, ALLOWED)
+
+
+@pytest.mark.parametrize(
     "text",
     [
         "version 1.10.0.1",
@@ -154,7 +179,7 @@ def test_generic_findings_detect(text: str, category: str) -> None:
         "placeholder aa:bb:cc:dd:ee:ff and 00:00:5e:00:53:01",
         "documentation 00005e00539d and eui 00:00:5e:ef:10:a3:f4:c7 and 0x00005eef10a3f4c7",
         "fiction mobile 06 39 98 27 58 and +44 20 7946 0738",
-        "sequential 3e:22:fb:12:34:56 and 00:11:22:33:44:55 and de:ad:be:ef:ca:fe",
+        "sequential 3e:22:fb:12:34:56 and 02:11:22:33:44:55 and de:ad:be:ef:ca:fe",
         "frame 01:03:00:0a:00:02 and mask ff:ff:ff:ff:ff:00",
         "sha a6c1381a2b3c and commit 1234567890ab",
         "zigbee 0x0000000000000000 and 0x0123456789abcdef and 0x02158d0001a2b3c4",
@@ -361,7 +386,7 @@ def test_check_files_rejects_lfs_pointers(repo: Repo, capsys: Capture) -> None:
 
 
 def test_check_files_reads_binary_metadata(repo: Repo, capsys: Capture) -> None:
-    photo = jpeg(exif_segment(tiff([ascii_field(ARTIST, "jane@example-corp.fr")], gps_position())))
+    photo = jpeg(exif_segment(tiff([ascii_field(ARTIST, "jane@zorble.internal")], gps_position())))
     repo.write("photo.jpg", photo)
     repo.write("fixtures/photo.jpg", photo)
     repo.write("doc.pdf", pdf(b"/Author (Blue\\146inch)"))
@@ -427,7 +452,7 @@ def test_check_changes_finds_content_removed_later(repo: Repo, capsys: Capture) 
         "token  # gitleaks:allow\n",
     )
     repo.write("fixtures/data.txt", "10.0.0.5\n")
-    repo.write("LICENSE", "https://nas.example-corp.fr\n")
+    repo.write("LICENSE", "https://nas.zorble.internal\n")
     repo.write("image.bin", b"\0 Artist: Bluefinch \0")
     repo.write("docs/bluefinch.md", "ok\n")
     repo.write("docs/wrapped.md", "We meet at rue des\nLilas.\n")
@@ -576,10 +601,10 @@ def test_check_identities(capsys: Capture) -> None:
             commit(),
             commit(author_name="Bluefinch"),
             commit(author_email="someone@vendor.io"),
-            commit(author_email="noreply@family-domain.fr"),
+            commit(author_email="noreply@family.internal"),
             commit(committer_email="1+bluefinch@users.noreply.github.com"),
             commit(message="fix: thanks bluefinch"),
-            commit(message="docs: see https://nas.example-corp.fr"),
+            commit(message="docs: see https://nas.zorble.internal"),
         ]
     )
     out = capsys.readouterr().out
@@ -597,7 +622,7 @@ def test_check_messages(capsys: Capture) -> None:
     check.check_messages(
         [
             commit(),
-            commit(message="docs: see https://nas.example-corp.fr"),
+            commit(message="docs: see https://nas.zorble.internal"),
             commit(message="docs: link\n\nhttps://docs.vendor.io/x  ci-allow: url"),
             commit(sha="b" * 40, message=trailer, author_email=DEPENDABOT),
         ],

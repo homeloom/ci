@@ -240,3 +240,49 @@ def test_hacs_gate_reads_the_visibility(
     )
     assert result.returncode == status, result.stdout + result.stderr
     assert outputs.read_text(encoding="utf-8") == written
+
+
+def test_hacs_runs_only_when_the_repository_is_public() -> None:
+    lines = (WORKFLOWS / "ha-integration.yml").read_text(encoding="utf-8").splitlines()
+    condition = lines[lines.index("      - name: HACS") + 1]
+    assert condition == (
+        "        if: ${{ !cancelled() && steps.visibility.outputs.private == 'false' }}"
+    )
+
+
+def test_minimum_leg_installs_the_bounded_plugin(repo: Repo, tmp_path: Path) -> None:
+    fake = tmp_path / "bin"
+    fake.mkdir()
+    calls = tmp_path / "calls"
+    uv = fake / "uv"
+    uv.write_text(
+        f'#!/bin/sh\necho "$@" >> {calls}\n'
+        'if [ "$2" = show ]; then printf "Name: x\\nVersion: 1\\n"; fi\n',
+        encoding="utf-8",
+    )
+    uv.chmod(0o755)
+    repo.write("custom_components/zorble/manifest.json", '{"requirements": ["zorblelib==1.0"]}')
+    (tmp_path / "runner").mkdir()
+    result = run_step(
+        repo,
+        tmp_path,
+        "Install dependencies",
+        bin_dir=fake,
+        extra={
+            "SPEC": "homeassistant==2026.3.0",
+            "CUTOFF": "2026-03-11T12:00:00Z",
+            "REQUIREMENTS": "requirements_test.txt",
+            "PLUGIN": workflow_env("PLUGIN"),
+        },
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    install = calls.read_text(encoding="utf-8").splitlines()[0].split()
+    assert install[:4] == [
+        "pip",
+        "install",
+        "--system",
+        "homeassistant==2026.3.0",
+    ]
+    assert "pytest-homeassistant-custom-component>=0.13" in install
+    assert "--exclude-newer" in install
+    assert "zorblelib=" in " ".join(install)

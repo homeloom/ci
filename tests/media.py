@@ -48,14 +48,11 @@ def tiff(fields: Sequence[Field] = (), gps: Sequence[Field] = (), order: str = "
     return header + _ifd(main, 8, order) + _ifd(gps, gps_offset, order)
 
 
-def gps_position(order: str = "<", degrees: int = 32) -> list[Field]:
-    """Return GPS fields at 32.87336, 117.22743, the Home Assistant test coordinates.
-
-    No reference fields are written, so readers take the longitude as east.
-    """
+def gps_position(order: str = "<", degrees: int = 0) -> list[Field]:
+    """Return GPS fields one second north and east of 0, 0, in the open sea."""
     return [
-        rational_field(GPS_LATITUDE, order, (degrees, 1), (52, 1), (2410, 100)),
-        rational_field(GPS_LONGITUDE, order, (117, 1), (13, 1), (3875, 100)),
+        rational_field(GPS_LATITUDE, order, (degrees, 1), (0, 1), (100, 100)),
+        rational_field(GPS_LONGITUDE, order, (0, 1), (0, 1), (100, 100)),
     ]
 
 

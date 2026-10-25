@@ -80,9 +80,10 @@ A secret cannot be read back, so separate lists let each one be replaced
 whole without retyping the others. Callers pass them with
 `secrets: inherit` (see the design notes). The checks print how many lists
 were read and how many are empty, never a term. GitHub itself shows the
-secrets context in the step headers with every value masked, so the names of
-the secrets appear in the logs: give them neutral, numbered names that say
-nothing about their content. GitHub also masks
+secrets context in the step headers of the Hygiene job with every value
+masked, so the name of every secret the repository can see appears in the
+logs: give all of them neutral names, and the denylists numbered names that
+say nothing about their content. GitHub also masks
 each line of a secret everywhere in the log, so a line made only of `#`
 signs hides those signs in the whole log; start comments with `# ` and a
 word.
@@ -94,8 +95,8 @@ also matches `first_last`, `First-Last`, `FirstLast` and a `First` that ends
 one line followed by a `Last` that starts the next. A camel case term such
 as `FirstLast` matches the same spellings. Terms of five letters and digits
 or more also match as a part of a camel case name, such as `getFirstLast`,
-and next to digits, such as `FirstLast2`, unless they are spelled only with
-hexadecimal digits. Numbers are stricter, so that dates, times and versions
+and, unless they are spelled only with hexadecimal digits, next to digits,
+such as `FirstLast2`. Numbers are stricter, so that dates, times and versions
 do not match: a number never touches another digit or a dot followed by a
 digit, two numbers are separated by exactly one space, dot, dash or
 underscore, a word and the number after it by anything but a comma or a
@@ -103,7 +104,7 @@ colon, and a number and the word after it by anything but a colon. So
 `12.3.0` matches `12 3 0` and `12_3_0`, but not `2026-12-30`, `12:30`,
 `1230`, `[12, 3, 0]` or `v1.12.3.0`, and `step 12` does not match
 `"step": 12`. A term always matches as it is written, so `03/12/1985` and
-`12, rue Quillmore` match themselves. Text
+`12, Quillmore Street` match themselves. Text
 that writes characters as escapes (`\u00e9`, `\x41`, `\n`, `%20`, `&eacute;`)
 is also matched decoded. List only terms that never belong in a repository:
 not the GitHub usernames of maintainers, which appear in noreply addresses
@@ -351,8 +352,9 @@ published as pre-releases.
 - **Secrets**: each denylist secret (a name starting with `PRIVACY_DENYLIST`)
   exists as an organization Actions secret and as an organization Dependabot
   secret of the same name, both available to every repository that calls
-  `hygiene.yml`. GitHub prints secret names in every job log, so their names
-  are neutral and numbered (`PRIVACY_DENYLIST_1`, `PRIVACY_DENYLIST_2`…) and
+  `hygiene.yml`. The step headers of the Hygiene job list the name of every
+  secret a repository can see, so every secret name stays neutral, and the
+  denylists are numbered (`PRIVACY_DENYLIST_1`, `PRIVACY_DENYLIST_2`…) and
   never say what a list holds.
 - **Dependabot**: allowed to read this private repository, so it can update
   the pins in other repositories.

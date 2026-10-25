@@ -186,7 +186,9 @@ PLACEHOLDER_HEX = {
 }
 HEX_WORDS = ("babe", "bead", "beef", "c0de", "cafe", "d00d", "dead", "deaf", "f00d", "face", "feed")
 # Telephone ranges reserved for fiction and documentation: France (ARCEP),
-# North America (555-0100 to 555-0199) and the United Kingdom (Ofcom).
+# North America (555-0100 to 555-0199, after the area code) and the United
+# Kingdom (Ofcom).
+FICTION_NORTH_AMERICA = ("55501",)
 FICTION_PHONE_PREFIXES = (
     "33199",
     "332619",
@@ -207,9 +209,9 @@ FICTION_PHONE_PREFIXES = (
     "442079460",
     "447700900",
 )
-# Hardware address ranges reserved for documentation (RFC 7042): MAC-48
-# and EUI-64.
-DOCUMENTATION_HARDWARE = ("00005e0053", "00005eef10")
+# Hardware address ranges reserved for documentation (RFC 7042).
+DOCUMENTATION_MAC = ("00005e0053",)
+DOCUMENTATION_EUI64 = ("00005eef10",)
 # Coordinates used by the Home Assistant test harness.
 PLACEHOLDER_COORDINATES = {"32.87336", "-117.22743"}
 HOME_DIRECTORY_PLACEHOLDERS = {
@@ -433,7 +435,7 @@ def _is_placeholder_number(digits: str) -> bool:
 
 def _is_fiction(international: str) -> bool:
     if international.startswith("1") and len(international) == 11:
-        return international[4:7] == "555" and international[7:9] == "01"
+        return international[4:].startswith(FICTION_NORTH_AMERICA)
     return international.startswith(FICTION_PHONE_PREFIXES)
 
 
@@ -539,27 +541,27 @@ def _real_hex(digits: str) -> bool:
     return not _is_placeholder_hex(digits) and not _is_byte_data(digits)
 
 
-def _real_hardware(digits: str) -> bool:
-    return _real_hex(digits) and not digits.lower().startswith(DOCUMENTATION_HARDWARE)
+def _real_hardware(digits: str, documentation: tuple[str, ...]) -> bool:
+    return _real_hex(digits) and not digits.lower().startswith(documentation)
 
 
 def _mac(text: str, _allowed: tuple[str, ...]) -> Iterator[Span]:
     for kind, span, digits in _hex_addresses(text):
-        if kind == "mac" and _real_hardware(digits):
+        if kind == "mac" and _real_hardware(digits, DOCUMENTATION_MAC):
             yield span
     for pattern in (_MAC_DOTTED, _MAC_BARE):
         for match in pattern.finditer(text):
-            if _real_hardware(match.group(1).replace(".", "")):
+            if _real_hardware(match.group(1).replace(".", ""), DOCUMENTATION_MAC):
                 yield match.span(1)
 
 
 def _device_id(text: str, _allowed: tuple[str, ...]) -> Iterator[Span]:
     for kind, span, digits in _hex_addresses(text):
-        if kind == "device-id" and _real_hardware(digits):
+        if kind == "device-id" and _real_hardware(digits, DOCUMENTATION_EUI64):
             yield span
     for pattern in (_EUI64, _EUI64_BARE):
         for match in pattern.finditer(text):
-            if _real_hardware(match.group(1)):
+            if _real_hardware(match.group(1), DOCUMENTATION_EUI64):
                 yield match.span(1)
 
 

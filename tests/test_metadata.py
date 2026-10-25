@@ -75,7 +75,7 @@ def test_user_comment_in_the_exif_directory(value: bytes, expected: str) -> None
 def test_png_text_chunks() -> None:
     data = png(
         png_chunk(b"tEXt", b"Author\0Bluefinch"),
-        png_chunk(b"zTXt", b"Comment\0\0" + zlib.compress(b"jane@example-corp.fr")),
+        png_chunk(b"zTXt", b"Comment\0\0" + zlib.compress(b"jane@zorble.internal")),
         png_chunk(b"zTXt", b"Broken\0\0not zlib"),
         png_chunk(b"iTXt", b"Title\0\0\0fr\0Titre\0Chlo\xc3\xa9"),
         png_chunk(b"iTXt", b"Description\0\x01\0en\0\0" + zlib.compress(b"rue des Lilas")),
@@ -84,7 +84,7 @@ def test_png_text_chunks() -> None:
     texts = read_metadata(data).texts
     assert texts == (
         "Bluefinch",
-        "jane@example-corp.fr",
+        "jane@zorble.internal",
         "Titre",
         "Chloé",
         "rue des Lilas",

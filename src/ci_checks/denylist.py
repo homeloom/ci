@@ -59,8 +59,12 @@ _ESCAPES = re.compile(
 )
 # An escape right before or after a word in the text as written: "Marc\\u00e8le"
 # is one word, not the name "Marc", so such words are only matched decoded.
+# Before a word, an escape may also end with the first letter of the word, as
+# in "%2Bluefinch", which reads "+luefinch".
 _ESCAPE_AFTER = re.compile(r"\\u[0-9a-f]{4}|\\x[0-9a-f]{2}|%[0-9a-f]{2}|&#?\w+;")
-_ESCAPE_BEFORE = re.compile(rf"(?:{_ESCAPE_AFTER.pattern}|\\u[0-9a-f]{{8}})\Z")
+_ESCAPE_BEFORE = re.compile(
+    rf"(?:{_ESCAPE_AFTER.pattern}|\\u[0-9a-f]{{1,8}}|\\x[0-9a-f]|%[0-9a-f])\Z"
+)
 # A lower case letter followed by a capital, as in "getName".
 _CAMEL = re.compile(r"(?<=[a-z\xdf-\xf6\xf8-\xff])(?=[A-Z\xc0-\xd6\xd8-\xde])")
 # What may separate two words of a term, besides the separator the term
@@ -168,8 +172,10 @@ def _term_pattern(words: list[str], separators: list[str], glued: bool) -> str:
             gap = _BEFORE_NUMBER_GAP
         else:
             gap = _LETTERS_GAP
-        if gap != _LETTERS_GAP:
-            # A term always matches as it is written.
+        if gap != _LETTERS_GAP and not re.fullmatch(gap, own):
+            # A term always matches as it is written. A separator that the
+            # gap already accepts is not added, since two ways to match the
+            # same text make a failed match retry every combination.
             gap = f"(?:{re.escape(own)}|{gap})"
         pattern += gap + re.escape(word)
     if words[0][0].isdecimal():
@@ -183,26 +189,32 @@ def _term_pattern(words: list[str], separators: list[str], glued: bool) -> str:
     return start + pattern + end
 
 
-def _alternation(terms: Iterable[tuple[str, str]]) -> re.Pattern[str] | None:
-    """Compile term patterns, each with its first character, into one.
+def _alternation(terms: Iterable[tuple[str, int, str]]) -> re.Pattern[str] | None:
+    """Compile term patterns, with their size and first character, into one.
 
-    The terms are grouped by their first character, and each group first
-    checks what every term in it needs before it: no letter, and for terms
-    that start with a number, no digit either. Most places in a text then
-    fail without trying each term.
+    Terms are grouped by their first character, behind the check that every
+    term starting with a letter needs (no letter before it) or that every
+    term starting with a number needs (no letter or digit before it), so
+    most places in a text fail without trying each term. In a group, longer
+    terms come first, so that a term that extends another is found whole.
     """
-    groups: dict[str, list[str]] = {}
-    for pattern, first in terms:
-        groups.setdefault(first, []).append(pattern)
-    if not groups:
-        return None
-    alternatives = []
-    for first, patterns in sorted(groups.items()):
-        guard = r"(?<!\d)" if first.isdecimal() else ""
-        patterns.sort(key=len, reverse=True)
-        alternatives.append(f"(?={re.escape(first)}){guard}(?:{'|'.join(patterns)})")
-    firsts = "".join(map(re.escape, sorted(groups)))
-    return re.compile(rf"(?<![^\W\d_])(?=[{firsts}])(?:{'|'.join(alternatives)})")
+    groups: dict[str, list[tuple[int, str]]] = {}
+    for pattern, size, first in terms:
+        groups.setdefault(first, []).append((size, pattern))
+    branches = []
+    for numbers, guard in ((False, r"(?<![^\W\d_])"), (True, r"(?<![^\W_])")):
+        alternatives = []
+        for first, patterns in sorted(groups.items()):
+            if first.isdecimal() == numbers:
+                patterns.sort(key=lambda item: (item[0], len(item[1])), reverse=True)
+                joined = "|".join(pattern for _, pattern in patterns)
+                alternatives.append(f"(?={re.escape(first)})(?:{joined})")
+        if alternatives:
+            firsts = "".join(
+                re.escape(first) for first in sorted(groups) if first.isdecimal() == numbers
+            )
+            branches.append(f"{guard}(?=[{firsts}])(?:{'|'.join(alternatives)})")
+    return re.compile("|".join(branches)) if branches else None
 
 
 def _split(text: str) -> tuple[list[str], list[str]]:
@@ -217,9 +229,10 @@ class Denylist:
     """Terms that must never appear.
 
     "First Last" also matches "first_last", "First-Last", "FirstLast" and
-    "First\\nLast", and the term "FirstLast" matches all of them. Terms of at least
-    MIN_BINARY_TERM letters also match as a part of a camel case name, as in
-    "getFirstLast", and next to digits, as in "FirstLast2". "12.3.0" matches
+    "First\\nLast", and the term "FirstLast" matches all of them. Terms of at
+    least MIN_BINARY_TERM letters and digits also match as a part of a camel
+    case name, as in "getFirstLast", and, unless only hexadecimal digits
+    spell them, next to digits, as in "FirstLast2". "12.3.0" matches
     "12 3 0" and "12_3_0", but not "2026-12-30", "12:30", "1230" or "v1.12.3.0".
     """
 
@@ -245,14 +258,14 @@ class Denylist:
                 glued = size >= MIN_BINARY_TERM and not set("".join(words)) <= _HEX_DIGITS
                 letters[_term_pattern(words, separators, glued)] = (size, words[0][0])
                 self.longest_term = max(self.longest_term, len(words))
-        self._pattern = _alternation((p, first) for p, (_, first) in letters.items())
+        self._pattern = _alternation((p, size, first) for p, (size, first) in letters.items())
         # Random bytes spell short words by chance, so in binary content
         # shorter terms only count inside phrases (see matches_binary).
         self._long = _alternation(
-            (p, first) for p, (size, first) in letters.items() if size >= MIN_BINARY_TERM
+            (p, size, first) for p, (size, first) in letters.items() if size >= MIN_BINARY_TERM
         )
         self._phrase = _alternation(
-            (p, first)
+            (p, size, first)
             for p, (size, first) in letters.items()
             if MIN_PHRASE_TERM <= size < MIN_BINARY_TERM
         )
@@ -281,8 +294,9 @@ class Denylist:
     def _matches(self, text: str) -> Iterator[tuple[int, str, re.Match[str]]]:
         """Yield the terms found in a text as written and in its decoded form.
 
-        Both keep the lines of the text. As written, a word next to an escape
-        is skipped, because the escape may stand for a letter of that word.
+        Both keep the lines of the text. A word next to an escape is skipped,
+        because the escape may stand for a letter of that word; decoding once
+        can leave escapes that were themselves escaped.
         Each form is also searched with its camel case names split, for the
         longer terms.
         """
@@ -290,7 +304,7 @@ class Denylist:
             return
         decoded = unescape(text)
         view = 0
-        for source, guarded in ((text, decoded is not None), (decoded, False)):
+        for source, guarded in ((text, decoded is not None), (decoded, True)):
             if source is None:
                 continue
             views = [(self._pattern, normalize(source))]

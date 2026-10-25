@@ -28,7 +28,13 @@ All notable changes to this project are documented here. The format follows
   license classifiers, for every runtime dependency.
 - Home Assistant tests: coverage measured with the workflow's own
   configuration, at least 95 % by default, excluding only lines whose
-  `# pragma: no cover` gives a reason.
+  `# pragma: no cover` gives a reason. The oldest version tested can be
+  Home Assistant 2023.3 or later (`pytest-homeassistant-custom-component`
+  0.13), and the job stops with a clear error when that version needs
+  another Python than `python-minimum`.
+- Denylist matching that ignores case, accents and separators between the
+  words of a term, with stricter rules for numbers, so that dates, times and
+  versions never match a term made of numbers.
 - Composite actions for each check, and a tool installer that verifies
   SHA-256 digests.
 - Templates for new repositories: license, security policy, contribution
