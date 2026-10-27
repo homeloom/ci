@@ -1,8 +1,9 @@
 """Check the repository license and the licenses of runtime dependencies.
 
-The repository must ship a LICENSE file. Runtime dependencies (the
-`requirements` of Home Assistant manifests, plus any requirements files
-given) are installed into a temporary directory with uv, and the license
+The repository must ship a LICENSE file that holds the text of its
+license. Runtime dependencies (the `requirements` of Home Assistant
+manifests, the requirements.txt of Home Assistant apps, plus any
+requirements files given) are installed into a temporary directory with uv, and the license
 of every installed distribution, transitive ones included, must be on the
 allowed list. A package can be exempted by name when its license has been
 reviewed by hand.
@@ -23,9 +24,36 @@ from pathlib import Path
 from ci_checks._common import Reporter, fail, split_list
 
 LICENSE_FILES = ("LICENSE", "LICENSE.md", "LICENSE.txt", "COPYING")
+# Phrases that the text of each license holds, in lower case with whitespace
+# collapsed. The "-or-later" variants share the text of their license.
+_GPL2 = ("gnu general public license", "version 2, june 1991")
+_GPL3 = ("gnu general public license", "version 3, 29 june 2007")
+_LGPL21 = ("gnu lesser general public license", "version 2.1, february 1999")
+_LGPL3 = ("gnu lesser general public license", "version 3, 29 june 2007")
+_AGPL3 = ("gnu affero general public license", "version 3, 19 november 2007")
 LICENSE_FINGERPRINTS = {
-    "MIT": "permission is hereby granted, free of charge",
-    "Apache-2.0": "apache license",
+    "0BSD": ("permission to use, copy, modify, and/or distribute this software",),
+    "AGPL-3.0-only": _AGPL3,
+    "AGPL-3.0-or-later": _AGPL3,
+    "Apache-2.0": ("apache license", "version 2.0"),
+    "BSD-2-Clause": ("redistribution and use in source and binary forms",),
+    "BSD-3-Clause": ("redistribution and use in source and binary forms", "neither the name of"),
+    "BSL-1.0": ("boost software license - version 1.0",),
+    "CC0-1.0": ("cc0 1.0 universal",),
+    "GPL-2.0-only": _GPL2,
+    "GPL-2.0-or-later": _GPL2,
+    "GPL-3.0-only": _GPL3,
+    "GPL-3.0-or-later": _GPL3,
+    "ISC": ("permission to use, copy, modify, and",),
+    "LGPL-2.1-only": _LGPL21,
+    "LGPL-2.1-or-later": _LGPL21,
+    "LGPL-3.0-only": _LGPL3,
+    "LGPL-3.0-or-later": _LGPL3,
+    "MIT": ("permission is hereby granted, free of charge",),
+    "MIT-0": ("permission is hereby granted, free of charge",),
+    "MPL-2.0": ("mozilla public license version 2.0",),
+    "Unlicense": ("this is free and unencumbered software released into the public domain",),
+    "Zlib": ("altered source versions must be plainly marked as such",),
 }
 DEFAULT_ALLOWED = frozenset(
     """
@@ -131,6 +159,26 @@ FREE_TEXT = {
     "universal permissive": "UPL-1.0",
     "universal permissive 1.0": "UPL-1.0",
     "zlib/libpng": "Zlib",
+}
+# Short names of GNU and Mozilla licenses, as packages write them without a
+# classifier. They are translated only when the whole field is one of them.
+SHORT_NAMES = {
+    "agplv3": "AGPL-3.0-only",
+    "agplv3+": "AGPL-3.0-or-later",
+    "gplv2": "GPL-2.0-only",
+    "gplv2+": "GPL-2.0-or-later",
+    "gplv3": "GPL-3.0-only",
+    "gplv3+": "GPL-3.0-or-later",
+    "lgplv2": "LGPL-2.1-only",
+    "lgplv2+": "LGPL-2.1-or-later",
+    "lgplv2.1": "LGPL-2.1-only",
+    "lgplv2.1+": "LGPL-2.1-or-later",
+    "lgplv3": "LGPL-3.0-only",
+    "lgplv3+": "LGPL-3.0-or-later",
+    "mpl2": "MPL-2.0",
+    "mpl 2": "MPL-2.0",
+    "mplv2": "MPL-2.0",
+    "mozilla public 2": "MPL-2.0",
 }
 # Phrases of full license texts, compared with whitespace collapsed. A
 # single line is never read as a full text, since it is more likely a
@@ -310,9 +358,29 @@ def license_of(metadata: str) -> str | None:
     if "\n" not in text and _unexplained(text, classified):
         # Reported as written: the classifiers cannot express it.
         return text
+    identifiers = _license_ids(declared) if declared else []
+    if identifiers and all(map(_is_license_id, identifiers)):
+        # The field names licenses that the classifiers contradict, so both
+        # must be allowed.
+        field = f"({declared})" if len(identifiers) > 1 else declared
+        return " AND ".join([field, *sorted(classified)])
     # Several classifiers may mean a choice or a combination; assume the
     # stricter combination. Reviewed packages go in the exceptions.
     return " AND ".join(sorted(classified))
+
+
+def _is_license_id(identifier: str) -> bool:
+    """Return whether an identifier of the License field names a license, not loose words.
+
+    It is a known license, a versioned identifier such as BUSL-1.1, or a
+    LicenseRef. Words such as "Custom" or "BSD-like" are not.
+    """
+    known = {*DEFAULT_ALLOWED, *CLASSIFIERS.values(), *FREE_TEXT.values()}
+    return (
+        identifier.removesuffix("+") in known
+        or _VERSIONED.fullmatch(identifier.removesuffix("+")) is not None
+        or identifier.startswith("LicenseRef-")
+    )
 
 
 def _classifier_license(classifier: str) -> str | None:
@@ -397,6 +465,11 @@ def _text_license(text: str) -> str | None:
         return None
     if "\n" in text:
         return _full_text_license(text)
+    # The name of a classifier, or a short name, says exactly which GNU
+    # license the field means.
+    named = CLASSIFIERS.get(text) or SHORT_NAMES.get(_name_key(text))
+    if named:
+        return named
     if not RESTRICTIVE_TEXT.search(text):
         translated = _translate_names(text)
         if translated:
@@ -469,6 +542,39 @@ def _name_key(name: str) -> str:
     key = re.sub(r"[,()]", " ", name.lower().replace("licence", "license"))
     key = re.sub(r"\b(?:the|license|version)\b|\bv(?=\d)", " ", key)
     return " ".join(dict.fromkeys(key.split()))
+
+
+def check_license_file(path: Path, expected: str, reporter: Reporter) -> None:
+    """Report a license file that does not hold the text of the expected license."""
+    fingerprints = {name.lower(): phrases for name, phrases in LICENSE_FINGERPRINTS.items()}
+    phrases = fingerprints.get(expected.lower())
+    if phrases is None:
+        reporter.warning(
+            f"{path.name} is not compared with the {expected} license, whose text this "
+            "check does not know."
+        )
+        return
+    text = " ".join(path.read_text(encoding="utf-8", errors="replace").lower().split())
+    if not all(phrase in text for phrase in phrases):
+        reporter.error(f"{path.name} does not look like the {expected} license.")
+
+
+def app_requirements(root: Path) -> list[Path]:
+    """Return the requirements files of the Home Assistant apps of a repository.
+
+    An app is a folder at the root or one level down that holds a Dockerfile
+    and a config.yaml, config.yml or config.json. Its runtime dependencies
+    are the requirements.txt next to them.
+    """
+    found = []
+    for dockerfile in sorted([*root.glob("Dockerfile"), *root.glob("*/Dockerfile")]):
+        folder = dockerfile.parent
+        configs = ("config.yaml", "config.yml", "config.json")
+        if any((folder / name).is_file() for name in configs):
+            requirements = folder / "requirements.txt"
+            if requirements.is_file():
+                found.append(requirements)
+    return found
 
 
 def manifest_requirements(root: Path) -> list[str]:
@@ -561,7 +667,13 @@ def check_dependencies(
         if verdict is None:
             reporter.error(f"{name} {version}: license '{spdx}' could not be parsed.")
         elif not verdict:
-            reporter.error(f"{name} {version}: license '{spdx}' is not allowed.")
+            unmapped = (
+                " A LicenseRef stands for a license classifier that has no SPDX identifier:"
+                " review the license, then exempt the package."
+                if "LicenseRef-" in spdx
+                else ""
+            )
+            reporter.error(f"{name} {version}: license '{spdx}' is not allowed.{unmapped}")
         else:
             print(f"{name} {version}: {spdx}")
 
@@ -582,13 +694,11 @@ def main(argv: list[str] | None = None) -> int:
     if license_file is None:
         reporter.error("The repository has no LICENSE file.")
     else:
-        fingerprint = LICENSE_FINGERPRINTS.get(args.license)
-        text = license_file.read_text(encoding="utf-8", errors="replace").lower()
-        if fingerprint and fingerprint not in text:
-            reporter.error(f"{license_file.name} does not look like the {args.license} license.")
+        check_license_file(license_file, args.license, reporter)
 
     requirements = manifest_requirements(args.root)
     files = [args.root / path for path in split_list(args.requirements)]
+    files += [path for path in app_requirements(args.root) if path not in files]
     for path in files:
         if not path.is_file():
             reporter.error(f"Requirements file not found: {path.relative_to(args.root)}")

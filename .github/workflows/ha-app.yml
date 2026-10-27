@@ -35,19 +35,44 @@ jobs:
         with:
           path: ${{ matrix.path }}
 
+      # Build arguments as the Supervisor sets them: build_from is one image
+      # for every architecture or a map of architectures to images, and the
+      # Home Assistant base image stands in when it is missing or names no
+      # image for amd64. BUILD_VERSION is the version of the app, and the
+      # args of the build file come last, so they win.
       - name: Build image
         if: ${{ !cancelled() }}
         env:
           APP_PATH: ${{ matrix.path }}
         run: |
-          args=(--pull --platform linux/amd64 --build-arg BUILD_ARCH=amd64 --tag ci-app:test)
-          for file in build.yaml build.yml build.json; do
-            if [[ -f "${APP_PATH}/${file}" ]]; then
-              base="$(yq -r '.build_from.amd64 // ""' "${APP_PATH}/${file}")"
-              if [[ -n "$base" ]]; then
-                args+=(--build-arg "BUILD_FROM=${base}")
+          read_first() {
+            for name in "$@"; do
+              if [[ -f "${APP_PATH}/${name}" ]]; then
+                yq -o=json '.' "${APP_PATH}/${name}"
+                return
               fi
-              break
-            fi
-          done
+            done
+            echo '{}'
+          }
+          build="$(read_first build.yaml build.yml build.json)"
+          config="$(read_first config.yaml config.yml config.json)"
+          default="ghcr.io/home-assistant/amd64-base:latest"
+          base="$(jq -er --arg default "$default" '
+            .build_from as $from
+            | if $from == null then $default
+              elif ($from | type) == "string" then $from
+              elif ($from | type) == "object" then ($from.amd64 // $default)
+              else empty end' <<< "$build")" || {
+            echo "::error::${APP_PATH}: build_from must be an image or a map of architectures to images."
+            exit 1
+          }
+          args=(--pull --platform linux/amd64 --tag ci-app:test)
+          args+=(--build-arg BUILD_ARCH=amd64 --build-arg "BUILD_FROM=${base}")
+          version="$(jq -r '.version // empty' <<< "$config")"
+          if [[ -n "$version" ]]; then
+            args+=(--build-arg "BUILD_VERSION=${version}")
+          fi
+          while IFS= read -r -d '' arg; do
+            args+=(--build-arg "$arg")
+          done < <(jq -j '(.args // {}) | to_entries[] | "\(.key)=\(.value)\u0000"' <<< "$build")
           docker build "${args[@]}" "$APP_PATH"

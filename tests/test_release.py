@@ -20,7 +20,8 @@ SRC = Path(release.__file__).resolve().parent.parent
 # A gh stand-in: logs its arguments and answers tag lookups from FAKE_GH_TAGS.
 # A release that `release create` makes, or that a PATCH publishes, gets its
 # tag. FAKE_GH_FAIL names the steps that fail; with FAKE_GH_RACE, another run
-# has created the tag by then.
+# has created the tag by then. A tag points to FAKE_GH_TAG_SHA, and has a
+# release unless FAKE_GH_NO_RELEASE is set.
 FAKE_GH = """\
 import json, os, sys
 from pathlib import Path
@@ -47,6 +48,10 @@ if step == "draft":
     print("7 https://uploads.example/repos/owner/repo/releases/7/assets{?name,label}")
 elif "--paginate" in args:
     print("\\n".join(f"refs/tags/{tag}" for tag in tags))
+elif step == "read" and "/commits/" in args[1]:
+    print(os.environ["FAKE_GH_TAG_SHA"])
+elif step == "read" and "/releases/tags/" in args[1]:
+    sys.exit(1 if os.environ.get("FAKE_GH_NO_RELEASE") else 0)
 elif step == "read":
     sys.exit(0 if args[1].rsplit("/", 1)[1] in tags else 1)
 """
@@ -229,6 +234,8 @@ def publish(
     asset: bool = False,
     plan: bool = False,
     notes: str = "- A fix.\n",
+    tag_sha: str = "a" * 40,
+    no_release: bool = False,
 ) -> tuple[subprocess.CompletedProcess[str], list[list[str]]]:
     """Run publish.sh for version 1.2.0 with a stand-in gh, and return its gh calls."""
     bin_dir = tmp_path / "bin"
@@ -262,8 +269,11 @@ def publish(
         "PLAN": "true" if plan else "false",
         "ASSET": str(tmp_path / "dist" / "demo.zip") if asset else "",
     }
+    env["FAKE_GH_TAG_SHA"] = tag_sha
     if race:
         env["FAKE_GH_RACE"] = "1"
+    if no_release:
+        env["FAKE_GH_NO_RELEASE"] = "1"
     if asset and not (tmp_path / "dist").exists():
         write(tmp_path / "dist" / "demo.zip", "zip")
     result = subprocess.run(
@@ -316,6 +326,29 @@ def test_publish_existing_tag(tmp_path: Path) -> None:
     assert result.returncode == 0
     assert "Tag v1.2.0 already exists" in result.stdout
     assert created(calls) == []
+
+
+@pytest.mark.parametrize("plan", [False, True])
+def test_publish_existing_tag_on_another_commit(tmp_path: Path, plan: bool) -> None:
+    result, calls = publish(tmp_path, "v1.2.0", tag_sha="b" * 40, plan=plan)
+    assert result.returncode == 1
+    assert f"::error::Tag v1.2.0 points to {'b' * 40}, not to {'a' * 40}" in result.stdout
+    assert writes(calls) == []
+    assert "release=" not in result.stdout
+
+
+def test_publish_existing_tag_without_a_release(tmp_path: Path) -> None:
+    result, calls = publish(tmp_path, "v1.2.0", no_release=True)
+    assert result.returncode == 1
+    assert "::error::Tag v1.2.0 has no GitHub release." in result.stdout
+    assert writes(calls) == []
+
+
+def test_publish_race_with_a_tag_on_another_commit(tmp_path: Path) -> None:
+    result, calls = publish(tmp_path, "v1.1.0", fail="create", race=True, tag_sha="b" * 40)
+    assert result.returncode == 1
+    assert "points to" in result.stdout
+    assert len(created(calls)) == 1
 
 
 def test_publish_refuses_an_older_version(tmp_path: Path) -> None:

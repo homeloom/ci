@@ -22,9 +22,9 @@ on:
         type: string
         default: ""
       python-minimum:
-        description: Python version used with the oldest Home Assistant version. Home Assistant 2026.3 and later need 3.14.
+        description: Python version used with the oldest Home Assistant version. Defaults to the oldest one that release supports.
         type: string
-        default: "3.13"
+        default: ""
       python-latest:
         description: Python version used with the latest Home Assistant version.
         type: string
@@ -61,36 +61,28 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - name: minimum
-            python: ${{ inputs.python-minimum }}
-          - name: latest
-            python: ${{ inputs.python-latest }}
+        name: [minimum, latest]
     steps:
       - name: Check out
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
-      - name: Set up Python
-        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
-        with:
-          python-version: ${{ matrix.python }}
-
-      - name: Install uv
-        uses: $/actions/setup-tools
-        with:
-          tools: uv
-
-      - name: Select Home Assistant version
+      # The minimum leg runs the oldest supported Home Assistant release with
+      # the oldest Python it supports, unless python-minimum names one, and
+      # the pytest-homeassistant-custom-component release that pins it.
+      - name: Select versions
         id: select
         env:
           LEG: ${{ matrix.name }}
           MINIMUM: ${{ inputs.homeassistant-minimum }}
+          PYTHON_MINIMUM: ${{ inputs.python-minimum }}
+          PYTHON_LATEST: ${{ inputs.python-latest }}
         run: |
           : "${PLUGIN:?}"
           if [[ "$LEG" == "latest" ]]; then
             echo "spec=${PLUGIN}" >> "$GITHUB_OUTPUT"
+            echo "python=${PYTHON_LATEST}" >> "$GITHUB_OUTPUT"
           else
             if [[ -z "$MINIMUM" ]]; then
               MINIMUM="$(jq -er '.homeassistant' hacs.json)" || {
@@ -98,52 +90,143 @@ jobs:
                 exit 1
               }
             fi
-            release="$(curl -fsS --retry 3 --connect-timeout 10 --max-time 60 \
-              "https://pypi.org/pypi/homeassistant/${MINIMUM}/json")"
-            # uv only logs that no solution exists and why; this annotation
-            # also names the input to change.
-            requires="$(jq -r '.info.requires_python // ""' <<< "$release")"
-            python - "$MINIMUM" "$requires" <<'PY'
+            python3 - "$MINIMUM" <<'PY'
+          import json
           import operator
+          import os
           import re
           import sys
+          import time
+          import urllib.request
+          from datetime import datetime, timedelta
 
-          minimum, requires = sys.argv[1:]
-          compare = {">=": operator.ge, ">": operator.gt, "<=": operator.le, "<": operator.lt}
-          for clause in requires.split(","):
-              match = re.fullmatch(r"\s*(>=|>|<=|<)\s*(\d+(?:\.\d+){0,2})\s*", clause)
-              if not match:
-                  continue
-              wanted = tuple(map(int, match[2].split("."))) + (0,) * (2 - match[2].count("."))
-              if not compare[match[1]](sys.version_info[:3], wanted):
-                  python = ".".join(map(str, sys.version_info[:3]))
+          minimum = sys.argv[1]
+          pypi = os.environ.get("PYPI_URL", "https://pypi.org/pypi")
+          plugin = re.match(r"[A-Za-z0-9._-]+", os.environ["PLUGIN"])[0]
+
+
+          def fetch(path):
+              for attempt in range(3):
+                  try:
+                      with urllib.request.urlopen(f"{pypi}/{path}/json", timeout=60) as answer:
+                          return json.load(answer)
+                  except OSError as err:
+                      if attempt == 2:
+                          print(f"::error::Could not read {path} from PyPI: {err}")
+                          sys.exit(1)
+                      time.sleep(5)
+
+
+          def uploaded(files):
+              return min(datetime.fromisoformat(f["upload_time_iso_8601"]) for f in files)
+
+
+          def version(text):
+              return tuple(map(int, text.split(".")))
+
+
+          def satisfies(python, requires):
+              """Whether the newest patch of python (or python itself, with a patch) fits."""
+              parts = version(python)
+              compare = {">=": operator.ge, ">": operator.gt, "<=": operator.le, "<": operator.lt}
+              for clause in requires.split(","):
+                  match = re.fullmatch(r"\s*(>=|>|<=|<)\s*(\d+(?:\.\d+){0,2})\s*", clause)
+                  if not match:
+                      continue
+                  wanted = version(match[2]) + (0,) * (2 - match[2].count("."))
+                  newest = parts + (0 if match[1][0] == "<" else 999,) * (3 - len(parts))
+                  if not compare[match[1]](newest, wanted):
+                      return False
+              return True
+
+
+          release = fetch(f"homeassistant/{minimum}")
+          requires = release["info"].get("requires_python") or ""
+          chosen = os.environ.get("PYTHON_MINIMUM", "")
+          if chosen and not satisfies(chosen, requires):
+              print(
+                  f"::error::Home Assistant {minimum} requires Python {requires}, and "
+                  f"python-minimum is {chosen}. Set python-minimum to a version that "
+                  "satisfies it, or leave it empty to use the oldest one that does."
+              )
+              sys.exit(1)
+          if not chosen:
+              latest = version(os.environ["PYTHON_LATEST"])
+              candidates = [f"3.{minor}" for minor in range(12, latest[1] + 1)]
+              chosen = next((python for python in candidates if satisfies(python, requires)), "")
+              if not chosen:
                   print(
-                      f"::error::Home Assistant {minimum} requires Python {requires}, and this "
-                      f"leg runs Python {python}. Set python-minimum to a version that "
-                      "satisfies it (3.14 for Home Assistant 2026.3 and later)."
+                      f"::error::Home Assistant {minimum} requires Python {requires}, which "
+                      f"no version from 3.12 to python-latest satisfies. Set python-minimum."
                   )
                   sys.exit(1)
+
+          # pytest-homeassistant-custom-component pins one Home Assistant
+          # release in each of its releases, which follow it within days.
+          released = uploaded(release["urls"])
+          near = []
+          found = None
+          index = fetch(plugin)["releases"]
+          window = sorted(
+              (uploaded(files), number)
+              for number, files in index.items()
+              if files and timedelta(days=-30) <= uploaded(files) - released <= timedelta(days=60)
+          )
+          for when, number in window[:30]:
+              requires_dist = fetch(f"{plugin}/{number}")["info"].get("requires_dist") or []
+              pins = [re.fullmatch(r"homeassistant\s*==\s*([^\s;,]+)", item) for item in requires_dist]
+              pinned = next((pin[1] for pin in pins if pin), None)
+              if pinned == minimum:
+                  found = (when, number)
+                  break
+              if pinned and re.fullmatch(r"\d+\.\d+\.\d+", pinned):
+                  near.append(pinned)
+          if found is None:
+              hint = (
+                  f" The releases near it pin {', '.join(sorted(set(near), key=version))}: set "
+                  "homeassistant-minimum to one of them."
+                  if near
+                  else " Set homeassistant-minimum to a release that it supports."
+              )
+              print(f"::error::No {plugin} release pins Home Assistant {minimum}.{hint}")
+              sys.exit(1)
+
+          # Old releases do not pin their transitive dependencies, and newer
+          # ones break them. Resolve as of one week after the release, which
+          # matches what an install of that release had, and late enough for
+          # the plugin release.
+          cutoff = max(released + timedelta(days=7), found[0] + timedelta(days=1))
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
+              output.write(f"spec=homeassistant=={minimum}\n")
+              output.write(f"plugin={plugin}=={found[1]}\n")
+              output.write(f"python={chosen}\n")
+              output.write(f"cutoff={cutoff.strftime('%Y-%m-%dT%H:%M:%SZ')}\n")
           PY
-            # Old releases do not pin their transitive dependencies, and newer
-            # ones break them. Resolve as of one week after the release, which
-            # matches what an install of that release had.
-            uploaded="$(jq -er '.urls[0].upload_time_iso_8601' <<< "$release")"
-            echo "spec=homeassistant==${MINIMUM}" >> "$GITHUB_OUTPUT"
-            echo "cutoff=$(date -u -d "${uploaded} + 7 days" +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
           fi
           echo "week=$(date -u +%G-%V)" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Python
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: ${{ steps.select.outputs.python }}
+
+      - name: Install uv
+        uses: $/actions/setup-tools
+        with:
+          tools: uv
 
       - name: Cache uv downloads
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.cache/uv
-          key: uv-${{ matrix.name }}-${{ matrix.python }}-${{ steps.select.outputs.week }}-${{ hashFiles(inputs.requirements, 'custom_components/*/manifest.json', 'hacs.json') }}
+          key: uv-${{ matrix.name }}-${{ steps.select.outputs.python }}-${{ steps.select.outputs.week }}-${{ hashFiles(inputs.requirements, 'custom_components/*/manifest.json', 'hacs.json') }}
           restore-keys: |
-            uv-${{ matrix.name }}-${{ matrix.python }}-
+            uv-${{ matrix.name }}-${{ steps.select.outputs.python }}-
 
       - name: Install dependencies
         env:
           SPEC: ${{ steps.select.outputs.spec }}
+          PLUGIN_SPEC: ${{ steps.select.outputs.plugin }}
           CUTOFF: ${{ steps.select.outputs.cutoff }}
           REQUIREMENTS: ${{ inputs.requirements }}
         run: |
@@ -155,7 +238,7 @@ jobs:
           else
             : > "$runtime"
           fi
-          args=("$SPEC" "$PLUGIN" --requirement "$runtime")
+          args=("$SPEC" "${PLUGIN_SPEC:-$PLUGIN}" --requirement "$runtime")
           if [[ -f "$REQUIREMENTS" ]]; then
             args+=(--requirement "$REQUIREMENTS")
           fi

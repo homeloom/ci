@@ -21,11 +21,27 @@ skip() {
 tag_exists() {
   gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${tag}" --silent 2>/dev/null
 }
+# An existing tag is only fine when it is this commit's release: a tag on
+# another commit, or a tag that no release uses, would leave the version
+# unreleased without a word.
+check_existing() {
+  local target
+  target="$(gh api "repos/${GITHUB_REPOSITORY}/commits/${tag}" --jq .sha)"
+  if [[ "$target" != "$SHA" ]]; then
+    echo "::error::Tag ${tag} points to ${target}, not to ${SHA}, the commit that changed the version. Delete the tag or bump the version again."
+    exit 1
+  fi
+  if ! gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${tag}" --silent 2>/dev/null; then
+    echo "::error::Tag ${tag} has no GitHub release. Delete the tag so that the next run releases it, or create the release by hand."
+    exit 1
+  fi
+  skip "$1"
+}
 # A failed create is not an error when another run published the same
 # version in the meantime.
 created_elsewhere() {
   if tag_exists; then
-    skip "Tag ${tag} was created by another run; nothing to release."
+    check_existing "Tag ${tag} was created by another run; nothing to release."
   fi
   exit 1
 }
@@ -37,7 +53,7 @@ if [[ "$CHANGED" != "true" ]]; then
   skip "This commit does not change the version (${VERSION}); nothing to release."
 fi
 if tag_exists; then
-  skip "Tag ${tag} already exists; nothing to release."
+  check_existing "Tag ${tag} already exists; nothing to release."
 fi
 gh api --paginate "repos/${GITHUB_REPOSITORY}/git/matching-refs/tags/v" --jq '.[].ref' \
   | python3 -P -m ci_checks.release newer --version "$VERSION"

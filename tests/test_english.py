@@ -230,8 +230,19 @@ def test_allowed_words() -> None:
         ("docs/fr/faq.md", False),
         ("notes.to.md", False),
         ("requirements.ha.txt", False),
-        # Next to README.md, README.ha.md is taken for a translation into Hausa.
-        ("README.ha.md", True),
+        # Codes that file names more often use for something else, such as
+        # ha for Home Assistant, never make a translation, even next to the
+        # English original.
+        ("README.ha.md", False),
+        ("docs/installation.ha.md", False),
+        ("README_OS.md", False),
+        # A tag in capitals, and any name in capitals with a separator.
+        ("README_FR.md", True),
+        ("README.FR.md", True),
+        ("DOCS_fr.md", True),
+        ("DOCS-pt_BR.md", True),
+        ("docs/installation_fr.md", False),
+        ("Docs_fr.md", False),
     ],
 )
 def test_is_translation(path: str, expected: bool) -> None:
@@ -242,6 +253,8 @@ def test_is_translation(path: str, expected: bool) -> None:
 REPOSITORY_FILES = frozenset(
     {
         "README.md",
+        "DOCS.md",
+        "Docs.md",
         "docs/guide.md",
         "docs/index.md",
         "docs/installation.md",
@@ -1031,3 +1044,35 @@ line-length = 100
 target-version = "py313"
 pytest-homeassistant-custom-component==0.13.205
 '''
+
+
+# Short French labels, as user interfaces and translation keys write them.
+FRENCH_LABELS = """
+Paramètres Réglages Démarrer Arrêter Créer Désactiver Sélectionner Humidité
+Qualité Sécurité Énergie Météo Prévisions Durée Délai Pièce Fenêtre Lumière
+Allumée Éteinte Fermé Écran Élément Données Réinitialiser Supprimer
+Températures Précédent Arrêt Activé Désactivé Intensité Luminosité Accès
+Préférences Thème Système Vérifier
+""".split()
+# Accented names, which start English sentences too.
+ACCENTED_NAMES = """
+José André René Zoé Hélène Genève Jérôme Québec Céline Mégane Clémence
+Montréal Bénédicte Valérie Amélie Frédéric Cécile Gérard Stéphane Thérèse
+Noël Chloé Inès Léa Raphaël Héloïse Sébastien Jérémie Mélanie Aurélien Cédric
+Pénélope Désirée Renée Agnès Clément Benoît Françoise Hervé Gaëlle Loïc Anaïs
+Jérémy Rémi Thaïs Mérida Bogotá Zürich Pokémon Café
+""".split()
+
+
+def test_short_labels_are_found_and_names_are_not() -> None:
+    found = [label for label in FRENCH_LABELS if english.looks_french(label)]
+    assert len(found) >= 0.75 * len(FRENCH_LABELS), sorted(set(FRENCH_LABELS) - set(found))
+    flagged = [
+        name
+        for name in ACCENTED_NAMES
+        if english.looks_french(name) or english.looks_french(f"{name} added a sensor.")
+    ]
+    # Désirée ends as a past participle does.
+    assert flagged == ["Désirée"]
+    # In a sentence, a capital still says that a word may be a name.
+    assert not english.looks_french("The Sécurité panel")
