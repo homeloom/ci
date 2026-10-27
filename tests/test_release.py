@@ -7,6 +7,7 @@ import os
 import random
 import subprocess
 import sys
+import zipfile
 from pathlib import Path
 
 import pytest
@@ -16,24 +17,38 @@ from helpers import Repo
 
 PUBLISH = Path(__file__).resolve().parent.parent / "actions" / "release" / "publish.sh"
 SRC = Path(release.__file__).resolve().parent.parent
-# A gh stand-in: logs its arguments, answers tag lookups from FAKE_GH_TAGS
-# (a tag created by `release create` exists afterwards), and fails
-# `release create` when FAKE_GH_CREATE_FAILS is set.
+# A gh stand-in: logs its arguments and answers tag lookups from FAKE_GH_TAGS.
+# A release that `release create` makes, or that a PATCH publishes, gets its
+# tag. FAKE_GH_FAIL names the steps that fail; with FAKE_GH_RACE, another run
+# has created the tag by then.
 FAKE_GH = """\
 import json, os, sys
 from pathlib import Path
 args = sys.argv[1:]
 log = Path(os.environ["FAKE_GH_LOG"])
-created = [json.loads(line)[2] for line in log.read_text().splitlines()] if log.exists() else []
 with log.open("a") as handle:
     handle.write(json.dumps(args) + "\\n")
-tags = os.environ["FAKE_GH_TAGS"].split()
+made = Path(f"{log}.tags")
+tags = os.environ["FAKE_GH_TAGS"].split() + (made.read_text().split() if made.exists() else [])
+method = args[args.index("--method") + 1] if "--method" in args else "GET"
 if args[:2] == ["release", "create"]:
-    sys.exit(1 if os.environ.get("FAKE_GH_CREATE_FAILS") else 0)
-if "--paginate" in args:
+    step = "create"
+elif method == "POST":
+    step = "upload" if "--input" in args else "draft"
+else:
+    step = {"PATCH": "publish", "DELETE": "delete"}.get(method, "read")
+failed = step in os.environ["FAKE_GH_FAIL"].split()
+if step in ("create", "publish") and (not failed or os.environ.get("FAKE_GH_RACE")):
+    with made.open("a") as handle:
+        handle.write(os.environ["FAKE_GH_TAG"] + "\\n")
+if failed:
+    sys.exit(1)
+if step == "draft":
+    print("7 https://uploads.example/repos/owner/repo/releases/7/assets{?name,label}")
+elif "--paginate" in args:
     print("\\n".join(f"refs/tags/{tag}" for tag in tags))
-    sys.exit(0)
-sys.exit(0 if args[1].rsplit("/", 1)[1] in tags + created else 1)
+elif step == "read":
+    sys.exit(0 if args[1].rsplit("/", 1)[1] in tags else 1)
 """
 
 CHANGELOG = """# Changelog
@@ -209,7 +224,11 @@ def publish(
     *,
     changed: bool = True,
     prerelease: bool = False,
-    fails: bool = False,
+    fail: str = "",
+    race: bool = False,
+    asset: bool = False,
+    plan: bool = False,
+    notes: str = "- A fix.\n",
 ) -> tuple[subprocess.CompletedProcess[str], list[list[str]]]:
     """Run publish.sh for version 1.2.0 with a stand-in gh, and return its gh calls."""
     bin_dir = tmp_path / "bin"
@@ -220,32 +239,49 @@ def publish(
     (bin_dir / "python3").unlink(missing_ok=True)
     (bin_dir / "python3").symlink_to(sys.executable)
     version = "1.2.0b1" if prerelease else "1.2.0"
-    write(tmp_path / "CHANGELOG.md", f"## [{version}]\n\n- A fix.\n")
+    write(tmp_path / "CHANGELOG.md", f"## [{version}]\n\n{notes}")
     log = tmp_path / "gh.log"
     log.unlink(missing_ok=True)
+    Path(f"{log}.tags").unlink(missing_ok=True)
+    output = tmp_path / "output"
+    output.unlink(missing_ok=True)
     env = {
         "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}",
         "PYTHONPATH": str(SRC),
         "FAKE_GH_LOG": str(log),
         "FAKE_GH_TAGS": tags,
+        "FAKE_GH_TAG": f"v{version}",
+        "FAKE_GH_FAIL": fail,
         "GITHUB_REPOSITORY": "owner/repo",
+        "GITHUB_OUTPUT": str(output),
         "SHA": "a" * 40,
         "VERSION": version,
         "PRERELEASE": "true" if prerelease else "false",
         "CHANGED": "true" if changed else "false",
         "CHANGELOG": "CHANGELOG.md",
+        "PLAN": "true" if plan else "false",
+        "ASSET": str(tmp_path / "dist" / "demo.zip") if asset else "",
     }
-    if fails:
-        env["FAKE_GH_CREATE_FAILS"] = "1"
+    if race:
+        env["FAKE_GH_RACE"] = "1"
+    if asset and not (tmp_path / "dist").exists():
+        write(tmp_path / "dist" / "demo.zip", "zip")
     result = subprocess.run(
         ["bash", str(PUBLISH)], cwd=tmp_path, env=env, capture_output=True, text=True, check=False
     )
     calls = [json.loads(line) for line in log.read_text().splitlines()] if log.exists() else []
+    if output.exists():
+        result.stdout += output.read_text()
     return result, calls
 
 
 def created(calls: list[list[str]]) -> list[list[str]]:
     return [call[2:] for call in calls if call[:2] == ["release", "create"]]
+
+
+def writes(calls: list[list[str]]) -> list[list[str]]:
+    """Return the API calls that change releases, without the token-free reads."""
+    return [call for call in calls if "--method" in call]
 
 
 def test_publish_latest(tmp_path: Path) -> None:
@@ -271,6 +307,7 @@ def test_publish_only_from_the_commit_that_changed_the_version(tmp_path: Path) -
     result, calls = publish(tmp_path, "v1.1.0", changed=False)
     assert result.returncode == 0
     assert "does not change the version (1.2.0); nothing to release." in result.stdout
+    assert "release=false" in result.stdout
     assert calls == []
 
 
@@ -290,7 +327,180 @@ def test_publish_refuses_an_older_version(tmp_path: Path) -> None:
 
 def test_publish_race(tmp_path: Path) -> None:
     # Another run created the tag: the failed create is not an error.
-    result, calls = publish(tmp_path, "v1.1.0", fails=True)
+    result, calls = publish(tmp_path, "v1.1.0", fail="create", race=True)
     assert result.returncode == 0
     assert "Tag v1.2.0 was created by another run" in result.stdout
     assert len(created(calls)) == 1
+
+
+def test_publish_create_fails(tmp_path: Path) -> None:
+    result, calls = publish(tmp_path, "v1.1.0", fail="create")
+    assert result.returncode == 1
+    assert len(created(calls)) == 1
+
+
+@pytest.mark.parametrize("asset", [False, True])
+def test_plan(tmp_path: Path, asset: bool) -> None:
+    result, calls = publish(tmp_path, "v1.1.0", plan=True, asset=asset)
+    assert result.returncode == 0, result.stderr
+    assert "::notice::v1.2.0 will be released." in result.stdout
+    assert result.stdout.endswith("release=true\n")
+    assert created(calls) == []
+    assert writes(calls) == []
+
+
+def test_plan_existing_tag(tmp_path: Path) -> None:
+    result, calls = publish(tmp_path, "v1.2.0", plan=True)
+    assert result.returncode == 0
+    assert result.stdout.endswith("release=false\n")
+    assert writes(calls) == []
+
+
+def test_plan_checks_the_notes(tmp_path: Path) -> None:
+    # Nothing is built for a release whose notes are missing.
+    result, _ = publish(tmp_path, "v1.1.0", plan=True, notes="")
+    assert result.returncode == 1
+    assert "The changelog section for 1.2.0 is empty." in result.stderr
+    assert "release=" not in result.stdout
+
+
+@pytest.mark.parametrize("prerelease", [False, True])
+def test_publish_asset(tmp_path: Path, prerelease: bool) -> None:
+    result, calls = publish(tmp_path, "v1.1.0", asset=True, prerelease=prerelease)
+    assert result.returncode == 0, result.stderr
+    assert created(calls) == []
+    draft, upload, publish_call = writes(calls)
+    tag = "v1.2.0b1" if prerelease else "v1.2.0"
+    assert draft[:3] == ["api", "--method", "POST"]
+    assert draft[3] == "repos/owner/repo/releases"
+    assert f"tag_name={tag}" in draft
+    assert f"target_commitish={'a' * 40}" in draft
+    assert "draft=true" in draft
+    assert f"prerelease={'true' if prerelease else 'false'}" in draft
+    assert upload[3] == "https://uploads.example/repos/owner/repo/releases/7/assets?name=demo.zip"
+    assert upload[upload.index("--input") + 1] == str(tmp_path / "dist" / "demo.zip")
+    assert publish_call[:4] == ["api", "--method", "PATCH", "repos/owner/repo/releases/7"]
+    assert "draft=false" in publish_call
+    assert f"make_latest={'false' if prerelease else 'true'}" in publish_call
+    assert f"::notice::Published {tag} with demo.zip." in result.stdout
+
+
+@pytest.mark.parametrize("step", ["upload", "publish"])
+def test_publish_asset_failure_deletes_the_draft(tmp_path: Path, step: str) -> None:
+    result, calls = publish(tmp_path, "v1.1.0", asset=True, fail=step)
+    assert result.returncode == 1
+    assert writes(calls)[-1] == [
+        "api",
+        "--method",
+        "DELETE",
+        "repos/owner/repo/releases/7",
+        "--silent",
+    ]
+
+
+def test_publish_asset_race(tmp_path: Path) -> None:
+    # Another run published the version first: only the draft is deleted.
+    result, calls = publish(tmp_path, "v1.1.0", asset=True, fail="publish", race=True)
+    assert result.returncode == 0
+    assert "Tag v1.2.0 was created by another run" in result.stdout
+    assert writes(calls)[-1][2:4] == ["DELETE", "repos/owner/repo/releases/7"]
+
+
+def test_publish_asset_draft_fails(tmp_path: Path) -> None:
+    result, calls = publish(tmp_path, "v1.1.0", asset=True, fail="draft")
+    assert result.returncode == 1
+    assert len(writes(calls)) == 1
+
+
+def test_publish_delete_failure_is_a_warning(tmp_path: Path) -> None:
+    result, _ = publish(tmp_path, "v1.1.0", asset=True, fail="upload delete")
+    assert result.returncode == 1
+    assert "::warning::Could not delete the draft release 7." in result.stdout
+
+
+def test_publish_missing_asset(tmp_path: Path) -> None:
+    (tmp_path / "dist").mkdir()
+    result, calls = publish(tmp_path, "v1.1.0", asset=True)
+    assert result.returncode == 1
+    assert "demo.zip does not exist." in result.stdout
+    assert writes(calls) == []
+
+
+def test_check_asset(tmp_path: Path) -> None:
+    folder = tmp_path / "custom_components" / "demo"
+    assert release.check_asset(tmp_path, "custom_components/demo", "demo.zip") == folder
+    for path, name, message in [
+        ("dist", "demo.tar.gz", "must be a plain file name"),
+        ("dist", "sub/demo.zip", "must be a plain file name"),
+        ("dist", ".zip", "must be a plain file name"),
+        ("../dist", "demo.zip", "must be a folder inside the repository"),
+        (str(tmp_path / "dist"), "demo.zip", "must be a folder inside the repository"),
+        (".", "demo.zip", "must not be the root"),
+    ]:
+        with pytest.raises(release.ReleaseError, match=message):
+            release.check_asset(tmp_path, path, name)
+
+
+def test_check_asset_matches_hacs(tmp_path: Path) -> None:
+    hacs = tmp_path / "hacs.json"
+    write(hacs, json.dumps({"name": "Demo", "filename": "other.zip"}))
+    release.check_asset(tmp_path, "dist", "demo.zip")
+    write(hacs, json.dumps({"name": "Demo", "zip_release": True, "filename": "demo.zip"}))
+    release.check_asset(tmp_path, "dist", "demo.zip")
+    for data in ({"zip_release": True, "filename": "other.zip"}, {"zip_release": True}):
+        write(hacs, json.dumps(data))
+        with pytest.raises(release.ReleaseError, match=r"hacs\.json installs from"):
+            release.check_asset(tmp_path, "dist", "demo.zip")
+    write(hacs, "[]")
+    release.check_asset(tmp_path, "dist", "demo.zip")
+
+
+def test_make_zip(tmp_path: Path) -> None:
+    folder = tmp_path / "dist"
+    write(folder / "manifest.json", "{}")
+    write(folder / "frontend" / "app.js", "export {};\n")
+    tool = write(folder / "tool.sh", "#!/bin/sh\n")
+    tool.chmod(0o755)
+    (folder / "empty").mkdir()
+    first = tmp_path / "out" / "demo.zip"
+    assert release.make_zip(folder, first) == 3
+    with zipfile.ZipFile(first) as archive:
+        assert archive.namelist() == ["frontend/app.js", "manifest.json", "tool.sh"]
+        assert archive.read("frontend/app.js") == b"export {};\n"
+        modes = {info.filename: info.external_attr >> 16 for info in archive.infolist()}
+        assert modes == {"frontend/app.js": 0o644, "manifest.json": 0o644, "tool.sh": 0o755}
+    # The same files give the same zip, whatever their dates.
+    os.utime(folder / "manifest.json", (0, 0))
+    second = tmp_path / "again.zip"
+    release.make_zip(folder, second)
+    assert second.read_bytes() == first.read_bytes()
+
+
+def test_make_zip_refuses(tmp_path: Path) -> None:
+    folder = tmp_path / "dist"
+    with pytest.raises(release.ReleaseError, match=r"does not exist\. Did the build run\?"):
+        release.make_zip(folder, tmp_path / "demo.zip")
+    folder.mkdir()
+    (folder / "empty").mkdir()
+    with pytest.raises(release.ReleaseError, match="is empty"):
+        release.make_zip(folder, tmp_path / "demo.zip")
+    write(tmp_path / "secret.txt", "outside")
+    (folder / "link").symlink_to(tmp_path / "secret.txt")
+    with pytest.raises(release.ReleaseError, match="holds a link: link"):
+        release.make_zip(folder, tmp_path / "demo.zip")
+    assert not (tmp_path / "demo.zip").exists()
+
+
+def test_main_asset(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    root = ["--root", str(tmp_path)]
+    asset = ["asset", "--path", "dist", "--name", "demo.zip"]
+    # Checking the settings needs no folder yet: the build makes it.
+    assert release.main([*root, *asset]) == 0
+    assert capsys.readouterr().out == ""
+    write(tmp_path / "dist" / "index.js", "export {};\n")
+    output = tmp_path / "out"
+    assert release.main([*root, *asset, "--output", str(output)]) == 0
+    assert capsys.readouterr().out == "Zipped 1 file(s) of dist into demo.zip.\n"
+    assert zipfile.is_zipfile(output / "demo.zip")
+    assert release.main([*root, "asset", "--path", "dist", "--name", "demo"]) == 1
+    assert "must be a plain file name" in capsys.readouterr().err

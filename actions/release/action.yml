@@ -15,9 +15,23 @@ inputs:
   changelog:
     description: Changelog file with one `## <version>` section per release.
     default: CHANGELOG.md
+  asset:
+    description: >-
+      File to attach to the release. The release is created as a draft, gets
+      the file, and is published only then.
+    default: ""
+  plan:
+    description: >-
+      "true" to only check whether this commit is released, without creating
+      anything. The answer is the release output.
+    default: "false"
   token:
-    description: Token allowed to create releases.
+    description: Token allowed to create releases, or to read tags when planning.
     default: ${{ github.token }}
+outputs:
+  release:
+    description: Whether this commit is released, "true" or "false", when planning.
+    value: ${{ steps.publish.outputs.release }}
 runs:
   using: composite
   steps:
@@ -29,6 +43,7 @@ runs:
         PYTHONPATH: ${{ github.action_path }}/../../src
       run: python3 -P -m ci_checks.release version --file "$VERSION_FILE" >> "$GITHUB_OUTPUT"
     - name: Publish release
+      id: publish
       shell: bash
       env:
         GH_TOKEN: ${{ inputs.token }}
@@ -38,5 +53,7 @@ runs:
         PRERELEASE: ${{ steps.version.outputs.prerelease }}
         CHANGED: ${{ steps.version.outputs.changed }}
         CHANGELOG: ${{ inputs.changelog }}
+        ASSET: ${{ inputs.asset }}
+        PLAN: ${{ inputs.plan }}
         PYTHONPATH: ${{ github.action_path }}/../../src
       run: bash "$GITHUB_ACTION_PATH/publish.sh"

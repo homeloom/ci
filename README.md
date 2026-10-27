@@ -15,7 +15,7 @@ the code and the history.
 | `.github/workflows/ha-tests.yml` | pytest on the oldest supported and the latest Home Assistant, with a coverage threshold. |
 | `.github/workflows/ha-integration.yml` | hassfest, plus HACS validation once the repository is public. |
 | `.github/workflows/ha-app.yml` | Home Assistant app lint and an amd64 image build. |
-| `.github/workflows/release.yml` | Publish `v<version>` with notes from `CHANGELOG.md` when the tag is missing. |
+| `.github/workflows/release.yml` | Publish `v<version>` with notes from `CHANGELOG.md` when the tag is missing, optionally with a zip built from the repository. |
 | `actions/` | Composite actions used by the workflows. Each can also be used on its own. |
 | `src/ci_checks/` | The Python checks behind the actions (standard library only). |
 | `templates/` | Files to copy into each repository, including the calling workflows. |
@@ -367,10 +367,28 @@ when present.
 | `sha` | required | Commit to release. |
 | `version-file` | the only integration manifest | `manifest.json`, `config.yaml`, `pyproject.toml` or a plain text file. |
 | `changelog` | `CHANGELOG.md` | Changelog with a `## [<version>]` section per release. |
+| `build-command` | none | Command that builds the asset folder, such as `npm run build`. It runs after `npm ci --ignore-scripts`, with Node 24. Needs `asset-path`. |
+| `asset-path` | none | Folder whose contents are zipped and attached to the release. |
+| `asset-name` | none | File name of the zip. With `zip_release` in `hacs.json`, it must be the `filename` there. |
 
 Call it from a workflow triggered by `workflow_run` after CI succeeds on a
 push to `main` (see the templates). Versions with a pre-release suffix are
 published as pre-releases.
+
+Without an asset, a single Release job runs, as in earlier versions. With
+`asset-path` and `asset-name`:
+
+- A **Plan** job checks, with a read-only token, whether the commit is
+  released. Nothing is built otherwise, so a merge that does not change the
+  version costs one short job.
+- A **Build asset** job, read-only as well, runs the build and zips the
+  contents of the folder, without the folder itself, as HACS expects. Links
+  are refused and the zip is the same for the same files.
+- The **Release** job creates the release as a draft, uploads the zip and
+  only then publishes it, so that an installer never sees the release
+  without its asset. If the upload or the publication fails, the draft is
+  deleted. The build never runs in the job that holds the token that may
+  write releases.
 
 ## Organization settings
 
