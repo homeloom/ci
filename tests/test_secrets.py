@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import base64
 import codecs
+import gzip
 import json
 import os
 import random
 import shutil
 import subprocess
 import sys
+import zlib
 from pathlib import Path
 
 import pytest
@@ -18,6 +20,7 @@ from ci_checks import secrets
 from ci_checks._common import EMPTY_SHA, Reporter
 from ci_checks.denylist import Denylist
 from helpers import EventWriter, Repo, pr_event
+from media import make_pdf, make_zip, pdf_stream
 
 CONFIG = Path(__file__).resolve().parent.parent / "actions" / "privacy" / "gitleaks.toml"
 INSTALL = CONFIG.parent.parent / "setup-tools" / "install.sh"
@@ -204,6 +207,28 @@ def test_unreadable_files(repo: Repo, monkeypatch: pytest.MonkeyPatch) -> None:
             (second, "end\\", "\nmore\n"),
             (second, "utf16.ps1", "\nline two\r\n"),
             (second, "was-binary.ps1", "one\n"),
+        ]
+    )
+
+
+def test_unreadable_files_read_archives_and_wide_text_without_a_bom(repo: Repo) -> None:
+    png = b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR"
+    repo.write("bundle.zip", make_zip(("a/config.py", b"token\n"), ("logo.png", png)))
+    repo.write("notes.gz", gzip.compress(b"one\n"))
+    repo.write("nested.zip", make_zip(("inner.zip", make_zip(("deep.txt", b"deep\n")))))
+    repo.write("export.ps1", "token\r\n".encode("utf-16-le"))
+    repo.write("doc.pdf", make_pdf(pdf_stream(zlib.compress(b"BT (token) Tj ET"))))
+    first = repo.commit()
+    repo.write("bundle.zip", make_zip(("a/config.py", b"token\nmore\n")))
+    second = repo.commit()
+    assert sorted(secrets.unreadable_files(repo.root, second)) == sorted(
+        [
+            (first, "bundle.zip", "token\n"),
+            (first, "doc.pdf", "BT (token) Tj ET"),
+            (first, "export.ps1", "token\r\n"),
+            (first, "nested.zip", "deep\n"),
+            (first, "notes.gz", "one\n"),
+            (second, "bundle.zip", "\nmore\n"),
         ]
     )
 
@@ -728,6 +753,17 @@ def test_gitleaks_allow_cannot_hide_texts(repo: Repo, event: EventWriter, capsys
     assert f"Commit {head[:12]}: message line 3: possible secret (github-pat)." in out
     assert "Pull request body, line 1: possible secret (github-pat)." in out
     assert "Secrets: 3 problem(s) found." in out
+
+
+@needs_gitleaks
+def test_gitleaks_reads_archives(repo: Repo, event: EventWriter, capsys: Capture) -> None:
+    base = repo.commit()
+    repo.write("dist/bundle.zip", make_zip(("config.py", ("header\n" + secret_line()).encode())))
+    head = repo.commit()
+    event(pr_event(base, head))
+    assert scan(repo, None) == 1
+    out = output(capsys)
+    assert f"Commit {head[:12]}: dist/bundle.zip:2: possible secret (github-pat)." in out
 
 
 @needs_gitleaks

@@ -67,9 +67,14 @@ def pr_event(
     body: str = "",
     login: str = "octocat",
     fork: bool = False,
+    before: str = "",
 ) -> dict:
-    """Return a minimal pull_request event payload."""
-    return {
+    """Return a minimal pull_request event payload.
+
+    With `before`, it is the synchronize event of a push whose previous
+    head was `before`.
+    """
+    event: dict = {
         "pull_request": {
             "title": title,
             "body": body,
@@ -82,3 +87,32 @@ def pr_event(
             },
         }
     }
+    if before:
+        event.update(action="synchronize", before=before, after=head)
+    return event
+
+
+def merge_resolving_a_submodule(repo: Repo) -> tuple[str, str]:
+    """Commit a merge that points a submodule to a commit neither parent had.
+
+    Returns the first commit and the merge. The submodule commits are absent
+    from the repository, as they usually are, and its folder stays empty.
+    """
+    (repo.root / "vendor" / "lib").mkdir(parents=True)
+    pointers = iter(str(digit) * 40 for digit in range(1, 5))
+
+    def point(message: str) -> str:
+        repo.git("update-index", "--add", "--cacheinfo", f"160000,{next(pointers)},vendor/lib")
+        return repo.commit(message)
+
+    base = point("chore: add the library")
+    repo.git("checkout", "--quiet", "-b", "side")
+    side = point("chore: update the library")
+    repo.git("checkout", "--quiet", "main")
+    point("chore: update the library again")
+    repo.git("update-index", "--cacheinfo", f"160000,{next(pointers)},vendor/lib")
+    tree = repo.git("write-tree").strip()
+    identity = ["-c", "user.name=octocat", "-c", f"user.email={NOREPLY}"]
+    merge = repo.git(*identity, "commit-tree", tree, "-p", "HEAD", "-p", side, "-m", "Merge side")
+    repo.git("update-ref", "HEAD", merge.strip())
+    return base, merge.strip()

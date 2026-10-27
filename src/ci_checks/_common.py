@@ -11,7 +11,7 @@ import subprocess
 import sys
 import tempfile
 from collections.abc import Iterable, Iterator
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 MAX_TEXT_BYTES = 1_000_000
@@ -180,9 +180,14 @@ def _utf16_without_bom(data: bytes) -> str | None:
     for encoding, zeros, others in (("utf-16-le", odd, even), ("utf-16-be", even, odd)):
         if pairs >= 4 and zeros >= pairs * 0.9 and others <= pairs * 0.02:
             text = data[: len(data) - len(data) % 2].decode(encoding, errors="replace")
-            controls = sum(char < " " and char not in "\t\n\r\f" for char in text)
-            return text if controls <= len(text) * 0.01 else None
+            return text if mostly_printable(text) else None
     return None
+
+
+def mostly_printable(text: str) -> bool:
+    """Return whether a decoded text has as few control characters as real text files."""
+    controls = sum(char < " " and char not in "\t\n\r\f" for char in text)
+    return controls <= len(text) * 0.01
 
 
 def read_text(path: Path, limit: int = MAX_TEXT_BYTES) -> str | None:
@@ -277,6 +282,23 @@ def new_commit_range(event: dict, root: Path | None = None) -> list[str]:
     return [after]
 
 
+def replaced_head(event: dict, root: Path) -> str | None:
+    """Return the previous head of a pull request branch that a force push replaced.
+
+    The commits that only the previous head held stay reachable on GitHub,
+    but base..head no longer selects them. A synchronize event names the
+    previous head: after a force push it is missing from the checkout, or
+    it is not in the history of the new head.
+    """
+    pr = event.get("pull_request")
+    before = event.get("before")
+    if not pr or event.get("action") != "synchronize" or not before or before == EMPTY_SHA:
+        return None
+    if _is_commit(before, root) and _is_ancestor(before, pr["head"]["sha"], root):
+        return None
+    return before
+
+
 def dependency_bot_commits(event: dict, new: Iterable[Commit]) -> set[str]:
     """Return the new commits written by a dependency update bot.
 
@@ -295,6 +317,14 @@ def _is_commit(revision: str, root: Path | None) -> bool:
         return True
     try:
         git("cat-file", "-e", f"{revision}^{{commit}}", cwd=root)
+    except subprocess.CalledProcessError:
+        return False
+    return True
+
+
+def _is_ancestor(ancestor: str, descendant: str, root: Path) -> bool:
+    try:
+        git("merge-base", "--is-ancestor", ancestor, descendant, cwd=root)
     except subprocess.CalledProcessError:
         return False
     return True
@@ -355,6 +385,8 @@ def changes(root: Path, revisions: list[str]) -> list[Change]:
     only the lines that differ from every parent count, which is what the
     merge itself introduced. The patch is read as bytes, line by line, so
     that carriage returns and odd bytes in files or names cannot shift it.
+    The combined diff of a merge gives no mode, so the mode of those files,
+    which tells a submodule from a file, is read from the merge's tree.
     """
     command = [
         "git",
@@ -376,15 +408,19 @@ def changes(root: Path, revisions: list[str]) -> list[Change]:
         "--",
     ]
     result: list[Change] = []
+    # The files of each merge commit whose mode the combined diff left out.
+    unknown_modes: dict[str, list[str]] = {}
     sha = path = blob = mode = ""
     added: set[int] | None = set()
-    open_file = in_header = False
+    open_file = in_header = combined = False
     parents = line = 0
 
     def close() -> None:
         if open_file:
             lines = None if added is None else frozenset(added)
             result.append(Change(sha, path, blob, mode, lines))
+            if combined and blob and not mode:
+                unknown_modes.setdefault(sha, []).append(path)
 
     with tempfile.TemporaryFile() as errors:
         process = subprocess.Popen(command, cwd=root, stdout=subprocess.PIPE, stderr=errors)
@@ -398,6 +434,7 @@ def changes(root: Path, revisions: list[str]) -> list[Change]:
                 close()
                 path, blob, mode, added = os.fsdecode(_header_path(raw)), "", "", set()
                 open_file = in_header = True
+                combined = not raw.startswith(b"diff --git ")
             elif not open_file:
                 continue
             elif hunk := _HUNK.match(raw):
@@ -424,7 +461,23 @@ def changes(root: Path, revisions: list[str]) -> list[Change]:
         if process.wait():
             errors.seek(0)
             raise subprocess.CalledProcessError(process.returncode, command, stderr=errors.read())
-    return result
+    modes = {
+        (merge, name): tree_mode
+        for merge, paths in unknown_modes.items()
+        for name, tree_mode in _tree_modes(root, merge, paths).items()
+    }
+    return [replace(c, mode=modes.get((c.sha, c.path), c.mode)) for c in result]
+
+
+def _tree_modes(root: Path, commit: str, paths: list[str]) -> dict[str, str]:
+    """Return the mode of each path in the tree of a commit."""
+    output = git_bytes("--literal-pathspecs", "ls-tree", "-z", commit, "--", *paths, cwd=root)
+    modes = {}
+    for entry in output.split(b"\0"):
+        if entry:
+            info, _, name = entry.partition(b"\t")
+            modes[os.fsdecode(name)] = info.split(b" ")[0].decode()
+    return modes
 
 
 def _header_path(header: bytes) -> bytes:

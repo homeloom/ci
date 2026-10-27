@@ -1,21 +1,23 @@
-"""Build small image and document files with metadata, for the tests."""
+"""Build small image, document and video files with metadata, for the tests."""
 
 from __future__ import annotations
 
+import io
 import struct
+import zipfile
 import zlib
 from collections.abc import Sequence
 
-ASCII, RATIONAL, BYTE, LONG, UNDEFINED = 2, 5, 1, 4, 7
+ASCII, RATIONAL, BYTE, LONG, UNDEFINED, UTF8 = 2, 5, 1, 4, 7, 129
 ARTIST, XP_AUTHOR, USER_COMMENT, EXIF_IFD, GPS_IFD = 0x013B, 0x9C9D, 0x9286, 0x8769, 0x8825
 GPS_LATITUDE, GPS_LONGITUDE = 2, 4
 # A field of an image file directory: tag, type, count and value bytes.
 Field = tuple[int, int, int, bytes]
 
 
-def ascii_field(tag: int, text: str) -> Field:
+def ascii_field(tag: int, text: str, kind: int = ASCII) -> Field:
     value = text.encode() + b"\0"
-    return tag, ASCII, len(value), value
+    return tag, kind, len(value), value
 
 
 def rational_field(tag: int, order: str, *numbers: tuple[int, int]) -> Field:
@@ -106,3 +108,43 @@ def xmp(attributes: str) -> bytes:
 
 def pdf(info: bytes) -> bytes:
     return b"%PDF-1.4\n1 0 obj\n<< " + info + b" >>\nendobj\ntrailer << /Info 1 0 R >>\n%%EOF\n"
+
+
+def atom(kind: bytes, *children: bytes) -> bytes:
+    """Return a QuickTime or MP4 atom holding the given bodies or child atoms."""
+    body = b"".join(children)
+    return struct.pack(">I", 8 + len(body)) + kind + body
+
+
+def location_atom(text: bytes) -> bytes:
+    """Return the user data atom of a video location, with its length and language."""
+    return atom(b"\xa9xyz", struct.pack(">HH", len(text), 0x15C7), text)
+
+
+def data_atom(text: bytes) -> bytes:
+    """Return the value of a metadata item: UTF-8 text in the default locale."""
+    return atom(b"data", struct.pack(">II", 1, 0), text)
+
+
+def movie(*children: bytes) -> bytes:
+    """Return a QuickTime file whose movie atom holds the given atoms."""
+    return atom(b"ftyp", b"qt  \0\0\0\0qt  ") + atom(b"mdat", b"\0" * 8) + atom(b"moov", *children)
+
+
+def make_zip(*members: tuple[str, bytes], method: int = zipfile.ZIP_DEFLATED) -> bytes:
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", method) as archive:
+        archive.writestr("folder/", b"")
+        for name, data in members:
+            archive.writestr(name, data)
+    return buffer.getvalue()
+
+
+def pdf_stream(content: bytes, filters: bytes = b"/Filter /FlateDecode") -> bytes:
+    return (
+        b"4 0 obj\n<< /Length 9 " + filters + b" >>\nstream\n" + content + b"\nendstream\nendobj\n"
+    )
+
+
+def make_pdf(*streams: bytes) -> bytes:
+    return b"%PDF-1.7\n" + b"".join(streams) + b"%%EOF\n"

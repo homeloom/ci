@@ -5,8 +5,9 @@ commit, with the rules of the action's own configuration. It runs from an
 empty directory on the git directory, so a .gitleaks.toml or .gitleaksignore
 in the repository has no effect. Commit messages, the pull request title and
 body, and the lines that commits add to the files gitleaks cannot read in a
-diff (UTF-16 or UTF-32 text, paths ending with a backslash) are written to a
-temporary directory and scanned there with the same rules. They are written
+diff (UTF-16 or UTF-32 text, the text files inside ZIP, gzip and PDF files,
+paths ending with a backslash) are written to a temporary directory and
+scanned there with the same rules. They are written
 under generated names, so the few rules limited to some file names, such as
 YAML files, do not apply to them.
 
@@ -14,8 +15,9 @@ Findings name the commit, file, rule and line, never the secret. A known
 false positive that is already in the history of the base branch can be
 ignored by listing its fingerprint. In the repository content, only
 gitleaks' own gitleaks:allow comment hides a line, and the privacy check
-warns about each line that adds it, in text and binary files alike, except
-in files over MAX_SCAN_BYTES, which it does not read.
+warns about each line that adds it, in text and binary files alike (PDF
+files included); it fails files over MAX_SCAN_BYTES, which it cannot read.
+The comment is removed from the texts of the directory scan.
 """
 
 from __future__ import annotations
@@ -34,6 +36,7 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
 from ci_checks._common import (
+    BINARY_SNIFF_BYTES,
     EMPTY_SHA,
     MAX_SCAN_BYTES,
     CheckError,
@@ -51,6 +54,7 @@ from ci_checks._common import (
     require_full_history,
 )
 from ci_checks.denylist import Denylist, denylist_sources
+from ci_checks.unpack import PACKED_SIGNATURES, unpack
 
 # gitleaks passes these to `git log` after splitting them on spaces. A merge
 # is diffed against its first parent, so that what the merge itself adds (a
@@ -233,36 +237,58 @@ def _added_lines(old: str, new: str) -> str:
     return "\n".join(added)
 
 
+def _hidden_text(data: bytes) -> str | None:
+    """Return the text that gitleaks cannot read in a diff of this content, or None.
+
+    That is wide text (UTF-16, with or without a byte order mark, or UTF-32)
+    and the text files that ZIP, gzip and PDF files hold compressed. git
+    log ignores --max-archive-depth, which only applies to directory scans.
+    """
+    if data.startswith(_WIDE_BOMS) or b"\0" in data[:BINARY_SNIFF_BYTES]:
+        text = decode_text(data)
+        if text is not None:
+            return text
+    texts = [
+        decode_text(part.data)
+        for part in unpack(data).parts
+        if not part.data.startswith(PACKED_SIGNATURES)
+    ]
+    texts = [text for text in texts if text is not None]
+    return "\n".join(texts) if texts else None
+
+
 def unreadable_files(root: Path, tip: str) -> list[tuple[str, str, str]]:
     """Return (commit, path, text) for the history files that gitleaks cannot read.
 
-    Git diffs UTF-16 and UTF-32 text as binary, and gitleaks 8.30.1 drops
-    the diff of a path that ends with a backslash. As in a diff, the text
-    holds the lines that the commit added, so that a later commit does not
-    report again what an earlier one added; the other lines are empty.
+    Git diffs wide text as binary, gitleaks does not open the archives of a
+    diff, and gitleaks 8.30.1 drops the diff of a path that ends with a
+    backslash. As in a diff, the text holds the lines that the commit added,
+    so that a later commit does not report again what an earlier one added;
+    the other lines are empty. The text of an archive is that of its text
+    members, one after the other, so its line numbers count in them.
     """
     changes = history_changes(root, tip)
     backslash = {new for _, path, _, new in changes if path.endswith("\\")}
     texts: dict[str, str] = {}
-    wide = set()
+    hidden = set()
     for blob, data in _read_blobs(root, {new for _, _, _, new in changes}):
-        is_wide = data.startswith(_WIDE_BOMS)
-        if is_wide or blob in backslash:
+        text = _hidden_text(data)
+        if text is not None:
+            hidden.add(blob)
+        elif blob in backslash:
             text = decode_text(data)
-            if text is not None:
-                texts[blob] = text
-                if is_wide:
-                    wide.add(blob)
+        if text is not None:
+            texts[blob] = text
     unreadable = [
         (sha, path, old, new)
         for sha, path, old, new in changes
-        if new in texts and (new in wide or path.endswith("\\"))
+        if new in texts and (new in hidden or path.endswith("\\"))
     ]
     # A file converted to UTF-16 has an older version that is not, and a
     # binary one has no line in common with the text.
     older = {old for _, _, old, _ in unreadable if old not in texts}
     for blob, data in _read_blobs(root, older):
-        texts[blob] = decode_text(data) or ""
+        texts[blob] = _hidden_text(data) or decode_text(data) or ""
     result = []
     for sha, path, old, new in unreadable:
         added = _added_lines(texts.get(old, ""), texts[new])
