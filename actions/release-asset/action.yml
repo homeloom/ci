@@ -1,0 +1,68 @@
+name: Release asset
+description: >-
+  Build the asset of a release: optionally install the npm development tools
+  and run a build command, then zip the contents of a folder and upload the
+  zip as a workflow artifact for the job that publishes the release.
+inputs:
+  build-command:
+    description: >-
+      Command that builds the folder, run after `npm ci --ignore-scripts` with
+      Node 24. Empty to zip the folder as it is in the repository.
+    default: ""
+  asset-path:
+    description: Folder whose contents are zipped, relative to the repository.
+    required: true
+  asset-name:
+    description: File name of the zip, such as the `filename` of hacs.json.
+    required: true
+  artifact:
+    description: Name of the workflow artifact that holds the zip.
+    default: release-asset
+runs:
+  using: composite
+  steps:
+    # Before the build, so that a wrong name fails in seconds.
+    - name: Check the asset settings
+      shell: bash
+      env:
+        ASSET_PATH: ${{ inputs.asset-path }}
+        ASSET_NAME: ${{ inputs.asset-name }}
+        PYTHONPATH: ${{ github.action_path }}/../../src
+      run: python3 -P -m ci_checks.release asset --path "$ASSET_PATH" --name "$ASSET_NAME"
+
+    - name: Set up Node
+      if: inputs.build-command != ''
+      uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+      with:
+        node-version: 24
+
+    # No package runs its install scripts.
+    - name: Install the tools
+      if: inputs.build-command != ''
+      shell: bash
+      run: npm ci --ignore-scripts
+
+    - name: Build
+      if: inputs.build-command != ''
+      shell: bash
+      env:
+        BUILD_COMMAND: ${{ inputs.build-command }}
+      run: eval "$BUILD_COMMAND"
+
+    - name: Zip
+      shell: bash
+      env:
+        ASSET_PATH: ${{ inputs.asset-path }}
+        ASSET_NAME: ${{ inputs.asset-name }}
+        PYTHONPATH: ${{ github.action_path }}/../../src
+      run: >-
+        python3 -P -m ci_checks.release asset --path "$ASSET_PATH" --name "$ASSET_NAME"
+        --output "$RUNNER_TEMP/release-asset"
+
+    - name: Keep the zip
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      with:
+        name: ${{ inputs.artifact }}
+        path: ${{ runner.temp }}/release-asset/${{ inputs.asset-name }}
+        if-no-files-found: error
+        retention-days: 1

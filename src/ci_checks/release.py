@@ -2,9 +2,11 @@
 
 `version` prints the version declared by the project and whether the checked
 out commit changed it, `newer` fails unless a version is greater than every
-version tag read from standard input, and `notes` prints the section of
-CHANGELOG.md for a version. They fail loudly so that a release is never
-published with a wrong tag, from the wrong commit or with empty notes.
+version tag read from standard input, `notes` prints the section of
+CHANGELOG.md for a version, and `asset` checks the settings of a release
+asset and zips its folder. They fail loudly so that a release is never
+published with a wrong tag, from the wrong commit, with empty notes or with
+an asset that installers would not find.
 """
 
 from __future__ import annotations
@@ -15,6 +17,7 @@ import re
 import subprocess
 import sys
 import tomllib
+import zipfile
 from collections.abc import Iterable
 from pathlib import Path
 
@@ -25,6 +28,11 @@ PRERELEASE = re.compile(r"[a-z]", re.IGNORECASE)
 # Pre-release phases in the order of PEP 440; a release comes after all of them.
 _PHASES = {"dev": 0, "a": 1, "alpha": 1, "b": 2, "beta": 2, "rc": 3}
 _YAML_VERSION = re.compile(r"""^version:\s*["']?([^"'\s#]+)["']?\s*(?:#.*)?$""", re.MULTILINE)
+# A plain file name, so that it is the same in the artifact, the upload URL
+# and the hacs.json of the repository.
+ASSET_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*\.zip$")
+# Zip entries get a fixed date, so that the same files give the same zip.
+_ZIP_DATE = (1980, 1, 1, 0, 0, 0)
 
 
 class ReleaseError(Exception):
@@ -128,6 +136,58 @@ def release_notes(changelog: str, version: str) -> str:
     raise ReleaseError(f"The changelog has no section for {version}.")
 
 
+def check_asset(root: Path, path: str, name: str) -> Path:
+    """Check the settings of a release asset and return its folder.
+
+    The folder must be inside the repository, the name a plain `.zip` file
+    name, and when hacs.json asks HACS to install from a zip, the name must
+    be its `filename`, or HACS would not find the asset.
+    """
+    if not ASSET_NAME.match(name):
+        raise ReleaseError(f"The asset name {name!r} must be a plain file name ending in .zip.")
+    folder = (root / path).resolve()
+    if Path(path).is_absolute() or not folder.is_relative_to(root.resolve()):
+        raise ReleaseError(f"The asset path {path!r} must be a folder inside the repository.")
+    if folder == root.resolve():
+        raise ReleaseError("The asset path must not be the root of the repository.")
+    hacs = root / "hacs.json"
+    if hacs.is_file():
+        data = json.loads(hacs.read_text(encoding="utf-8"))
+        if isinstance(data, dict) and data.get("zip_release") and data.get("filename") != name:
+            raise ReleaseError(
+                f"hacs.json installs from {data.get('filename')!r}, but the asset is {name!r}."
+            )
+    return folder
+
+
+def make_zip(folder: Path, output: Path) -> int:
+    """Zip the contents of a folder, without the folder itself, and return the file count.
+
+    HACS extracts a release zip into the folder of the integration, so its
+    files sit at the root of the zip. Links are refused: they could point
+    outside the folder.
+    """
+    if not folder.is_dir():
+        raise ReleaseError(f"The asset folder {folder.name} does not exist. Did the build run?")
+    files = []
+    for path in sorted(folder.rglob("*")):
+        if path.is_symlink():
+            raise ReleaseError(f"The asset folder holds a link: {path.relative_to(folder)}.")
+        if path.is_file():
+            files.append(path)
+    if not files:
+        raise ReleaseError(f"The asset folder {folder.name} is empty.")
+    output.parent.mkdir(parents=True, exist_ok=True)
+    with zipfile.ZipFile(output, "w", zipfile.ZIP_DEFLATED) as archive:
+        for path in files:
+            entry = zipfile.ZipInfo(path.relative_to(folder).as_posix(), _ZIP_DATE)
+            entry.compress_type = zipfile.ZIP_DEFLATED
+            mode = 0o755 if path.stat().st_mode & 0o111 else 0o644
+            entry.external_attr = mode << 16
+            archive.writestr(entry, path.read_bytes())
+    return len(files)
+
+
 def main(argv: list[str] | None = None) -> int:
     """Print the version or the release notes."""
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
@@ -140,6 +200,10 @@ def main(argv: list[str] | None = None) -> int:
     notes_parser = commands.add_parser("notes")
     notes_parser.add_argument("--version", required=True)
     notes_parser.add_argument("--changelog", default="CHANGELOG.md")
+    asset_parser = commands.add_parser("asset")
+    asset_parser.add_argument("--path", required=True)
+    asset_parser.add_argument("--name", required=True)
+    asset_parser.add_argument("--output", type=Path, help="Folder to write the zip to.")
     args = parser.parse_args(argv)
 
     try:
@@ -152,6 +216,11 @@ def main(argv: list[str] | None = None) -> int:
             print(f"changed={'true' if changed else 'false'}")
         elif args.command == "newer":
             check_newer(args.version, sys.stdin)
+        elif args.command == "asset":
+            folder = check_asset(args.root, args.path, args.name)
+            if args.output:
+                count = make_zip(folder, args.output / args.name)
+                print(f"Zipped {count} file(s) of {args.path} into {args.name}.")
         else:
             changelog = (args.root / args.changelog).read_text(encoding="utf-8")
             print(release_notes(changelog, args.version), end="")

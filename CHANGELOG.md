@@ -6,6 +6,21 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.2.0]
+
+### Added
+
+- `release.yml` can attach a zip to the release: `asset-path` names the
+  folder to zip and `asset-name` the file name, which must match the
+  `filename` of `hacs.json` when it sets `zip_release`. `build-command`
+  builds the folder first, after `npm ci --ignore-scripts` with Node 24.
+  The build runs in its own read-only job, only when the commit is released.
+  Without these inputs, `release.yml` works as before.
+- The release with an asset is created as a draft, gets the zip and is
+  published only then. A failed upload or publication deletes the draft.
+- The `release` action takes `asset` and `plan` inputs, and the new
+  `release-asset` action builds and zips the asset.
+
 ## [0.1.1]
 
 ### Changed
