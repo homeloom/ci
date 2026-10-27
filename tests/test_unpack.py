@@ -26,6 +26,17 @@ def test_gzip_and_nested_archives_are_read() -> None:
     assert found.problem is None
 
 
+def test_every_gzip_member_is_read(monkeypatch: pytest.MonkeyPatch) -> None:
+    members = gzip.compress(b"one") + gzip.compress(b"Quillmore")
+    found = unpack(members + b"\0" * 8)
+    assert [part.data for part in found.parts] == [b"one", b"Quillmore"]
+    assert found.problem is None
+    assert unpack(members + b"trailing").problem == "is not valid compressed data"
+    monkeypatch.setattr(unpack_module, "MAX_MEMBERS", 2)
+    assert unpack(members).problem is None
+    assert unpack(members + gzip.compress(b"")).problem == "has more than 2 members"
+
+
 def test_nesting_is_bounded() -> None:
     data = b"Quillmore"
     for _ in range(MAX_DEPTH):

@@ -105,8 +105,11 @@ class _Unpacker:
         elif data.startswith(b"%PDF"):
             self.pdf(data, depth)
 
-    def inflate(self, data: bytes | memoryview, wbits: int) -> bytes | None:
-        """Return zlib or gzip data inflated, or None when it cannot be read whole."""
+    def inflate(self, data: bytes | memoryview, wbits: int) -> tuple[bytes, bytes] | None:
+        """Return zlib or gzip data inflated and the bytes after it.
+
+        Return None when the data cannot be read whole.
+        """
         inflater = zlib.decompressobj(wbits)
         try:
             content = inflater.decompress(data, self.room + 1)
@@ -120,7 +123,7 @@ class _Unpacker:
             self.fail("is cut short")
             return None
         self.room -= len(content)
-        return content
+        return content, inflater.unused_data
 
     def zip(self, data: bytes, depth: int) -> None:
         try:
@@ -144,9 +147,19 @@ class _Unpacker:
             self.fail("is not a readable ZIP archive")
 
     def gzip(self, data: bytes, depth: int) -> None:
-        content = self.inflate(data, 31)
-        if content is not None:
+        # A gzip file may hold several members one after the other, as
+        # `gzip -c a b` writes them, and may end with zero bytes of padding.
+        rest = data
+        for _ in range(MAX_MEMBERS):
+            inflated = self.inflate(rest, 31)
+            if inflated is None:
+                return
+            content, rest = inflated
             self.take(content, depth)
+            rest = rest.lstrip(b"\0")
+            if not rest:
+                return
+        self.fail(f"has more than {MAX_MEMBERS} members")
 
     def pdf(self, data: bytes, depth: int) -> None:
         for match in _PDF_STREAM.finditer(data):
@@ -158,7 +171,7 @@ class _Unpacker:
                 if _PDF_FILTER.search(dictionary) and b"/FlateDecode" in dictionary:
                     self.fail("has a stream with a chain of filters")
                 continue
-            content = self.inflate(memoryview(data)[match.end() :], 15)
-            if content is None:
+            inflated = self.inflate(memoryview(data)[match.end() :], 15)
+            if inflated is None:
                 return
-            self.take(content, depth, pdf=True)
+            self.take(inflated[0], depth, pdf=True)
