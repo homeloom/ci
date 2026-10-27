@@ -6,6 +6,40 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.2.1]
+
+### Changed
+
+- Privacy: a file or history blob over 20 MB fails instead of giving a
+  warning, since its content cannot be checked.
+- Privacy: the content that ZIP files (Office, OpenDocument, EPUB, wheels),
+  gzip files and the Flate streams of PDF files hold compressed, and base64
+  `data:` URIs written on one line of a text file, go through the denylist
+  and the metadata checks, nested up to 4 levels deep and within 20 MB once
+  inflated. Content that cannot be read whole fails, as does metadata too
+  large to be read whole.
+- Privacy: PDF information fields written as hexadecimal strings or inside
+  compressed streams, EXIF 3.0 UTF-8 fields and the location of QuickTime
+  and MP4 videos are read. Hostile metadata is read in linear time.
+- Privacy: file paths, in the checkout and in history, and the branch name
+  go through the generic patterns a path can hold, and the parts that match
+  are redacted. A term split across folders is redacted too.
+- Privacy: a force push that leaves the replaced commits out of the
+  checked range is reported. License files only skip URLs and e-mail
+  addresses.
+- Privacy: firewall and switch addresses, coordinates under short keys
+  such as `home_lat`, and IPv4 addresses under keys such as `IPAddress`,
+  `IPADDR`, `DNS1` or a `nameserver` line are reported again. Coordinate
+  pairs are weighed by how they are written.
+- Privacy: Windows-1252 text with a stray NUL byte is read as text.
+- Phone numbers: `1-NNN-NNN-NNNN`, a French number followed by an hour
+  range, and a trunk prefix after the country code (`+44 (0)20 ...`) are
+  read. A fiction number with more digits after it is not exempt, and the
+  Ofcom drama blocks are complete.
+- Secrets: the text files inside ZIP, gzip and PDF files and UTF-16 files
+  without a byte order mark are scanned too. gitleaks does not open
+  archives in a history scan.
+
 ## [0.2.0]
 
 ### Added

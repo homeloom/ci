@@ -156,8 +156,10 @@ The **Hygiene** job checks:
   in JavaScript lock files (`package-lock.json`, `npm-shrinkwrap.json`,
   `pnpm-lock.yaml`, `bun.lock`) are accepted by the `generic-api-key` rule.
   Commit messages, the pull request title and body, and the lines added to
-  UTF-16 or UTF-32 files and to paths ending with a backslash are scanned
-  too, and the scan fails when gitleaks skips any of them. The action passes
+  UTF-16 (with or without a byte order mark) or UTF-32 files, to the text
+  files that ZIP, gzip and PDF files hold compressed, and to paths ending
+  with a backslash are scanned too, and the scan fails when gitleaks skips
+  any of them. The action passes
   its own configuration and runs outside the checkout, so a `.gitleaks.toml`
   or `.gitleaksignore` in the repository has no effect.
 - **Personal data** with generic patterns: private and link-local IP
@@ -258,9 +260,9 @@ of. A gitleaks finding can be ignored through `secrets-ignore` (see the
 exemptions below) or gitleaks' own `gitleaks:allow` comment, which works
 only in files git can diff as text: the privacy check warns about every
 added line that uses it, in text and binary files alike, and reviewers
-must question it. Files over 20 MB are not read, and only get a
-warning that they were not scanned. It has no effect in commit messages,
-the pull request text or UTF-16 and UTF-32 files.
+must question it. Files over 20 MB fail the privacy check, so they cannot
+hide one. It has no effect in commit messages, the pull request text,
+UTF-16 and UTF-32 files or the files inside archives.
 
 Exemptions, kept narrow on purpose:
 
@@ -290,16 +292,26 @@ Limits:
 
 - The generic patterns cannot recognize names, street addresses or public
   IPv4 addresses outside URLs (they look like version numbers), nor text in
-  images, archives or encoded data. The denylist and the review cover what
-  the patterns cannot.
+  images, archives or encoded data beyond their metadata. The denylist and
+  the review cover what the patterns cannot.
+- The denylist and the metadata checks also read what ZIP files (Office,
+  OpenDocument, EPUB, wheels), gzip files and the Flate streams of PDF files
+  hold compressed, nested up to 4 levels deep, and the base64 `data:` URIs
+  written on one line of a text file. Compressed content that cannot be
+  read whole (an encrypted member, a malformed archive, a chain of PDF
+  filters, more nesting, or more than 20 MB once inflated) fails the check,
+  as does metadata too large to be read whole.
 - In binary files, terms of three or four letters only count inside phrases
   of several words (such as a title in image metadata), and shorter terms not
   at all, because random bytes spell short words by chance. Single byte
   (Latin-1) strings are only searched for the longer terms. PDF files are
   always read as binary files.
-- Files larger than 20 MB are skipped with a warning.
+- Files larger than 20 MB fail the check, because their content cannot be
+  checked.
 - The gitleaks rules limited to some file names (PHP, Terraform, Kubernetes
-  YAML, `nuget.config`, PKCS#12) do not apply to UTF-16 or UTF-32 files.
+  YAML, `nuget.config`, PKCS#12) do not apply to UTF-16 or UTF-32 files or
+  to the files inside archives. The line numbers of a finding inside an
+  archive count in its text files, one after the other.
 - The language check recognizes French only. A label of one capitalized
   accented word (which may be a name) or a short subject of one such word
   can pass, and a capitalized French word at the start of a value, such as

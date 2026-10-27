@@ -12,7 +12,7 @@ import pytest
 
 from ci_checks import _common
 from ci_checks._common import Reporter
-from helpers import DEPENDABOT, EventWriter, Repo, pr_event
+from helpers import DEPENDABOT, EventWriter, Repo, merge_resolving_a_submodule, pr_event
 
 
 def test_tracked_files_and_text(repo: Repo) -> None:
@@ -117,6 +117,24 @@ def test_new_commit_range_after_force_push(repo: Repo) -> None:
     ]
 
 
+def test_replaced_head(repo: Repo) -> None:
+    first = repo.commit()
+    second = repo.commit()
+    assert _common.replaced_head(pr_event(first, second, before=first), repo.root) is None
+    # A rebase leaves the previous head out of the history of the new one.
+    repo.git("reset", "--quiet", "--hard", first)
+    rebased = repo.commit("fix: rebased")
+    rewritten = pr_event(first, rebased, before=second)
+    assert _common.replaced_head(rewritten, repo.root) == second
+    # The checkout usually lacks the replaced commits altogether.
+    missing = pr_event(first, rebased, before="e" * 40)
+    assert _common.replaced_head(missing, repo.root) == "e" * 40
+    opened = pr_event(first, rebased)
+    assert _common.replaced_head(opened, repo.root) is None
+    assert _common.replaced_head({**rewritten, "before": _common.EMPTY_SHA}, repo.root) is None
+    assert _common.replaced_head({"before": second, "after": rebased}, repo.root) is None
+
+
 def test_require_full_history(repo: Repo, tmp_path: Path) -> None:
     repo.commit()
     repo.commit()
@@ -133,8 +151,8 @@ def test_commits_read_raw_objects(repo: Repo, encoding: str) -> None:
     tree = repo.git("write-tree").strip()
     raw = (
         f"tree {tree}\nparent {base}\n"
-        "author Zo\xe9 <1+z@users.noreply.github.com> 1700000000 +0000\n"
-        "committer Zo\xe9 <1+z@users.noreply.github.com> 1700000000 +0000\n"
+        "author Zorbl\xe9 <1+z@users.noreply.github.com> 1700000000 +0000\n"
+        "committer Zorbl\xe9 <1+z@users.noreply.github.com> 1700000000 +0000\n"
         f"encoding {encoding}\n\nfix: ok\0hidden 10.0.0.2\n"
     ).encode("latin-1")
     sha = (
@@ -149,22 +167,22 @@ def test_commits_read_raw_objects(repo: Repo, encoding: str) -> None:
         .strip()
     )
     [commit] = _common.commits(repo.root, [f"{base}..{sha}"])
-    assert commit.author_name == "Zo\N{LATIN SMALL LETTER E WITH ACUTE}"
+    assert commit.author_name == "Zorbl\N{LATIN SMALL LETTER E WITH ACUTE}"
     assert commit.message == "fix: ok\0hidden 10.0.0.2"
     assert _common._identity(b"no address") == (b"no address", b"")
 
 
 def test_commits(repo: Repo) -> None:
     repo.commit(
-        "feat: first\n\nBody line.\x1e with a separator", name="Alice", email="a@example.com"
+        "feat: first\n\nBody line.\x1e with a separator", name="Zorblequix", email="z@example.com"
     )
     repo.commit("chore(deps): bump x", name="dependabot[bot]", email=DEPENDABOT)
     repo.commit("chore: spoofed", name="x", email="1+renovate[bot]@users.noreply.github.com")
     commits = _common.commits(repo.root, ["HEAD"])
     assert [c.is_dependency_bot for c in commits] == [False, True, False]
     commit = commits[2]
-    assert commit.author_name == "Alice"
-    assert commit.author_email == "a@example.com"
+    assert commit.author_name == "Zorblequix"
+    assert commit.author_email == "z@example.com"
     assert commit.message == "feat: first\n\nBody line.\x1e with a separator"
     assert len(commit.short) == 12
     assert _common.commits(repo.root, ["HEAD..HEAD"]) == []
@@ -249,7 +267,7 @@ def test_changes_of_merges_keep_only_new_lines(repo: Repo) -> None:
     repo.git("add", "--all")
     merge = repo.commit("Merge side")
     found = [c for c in _common.changes(repo.root, [f"{base}..HEAD"]) if c.sha == merge]
-    assert [(c.path, c.added) for c in found] == [("b.txt", {2})]
+    assert [(c.path, c.added, c.mode) for c in found] == [("b.txt", {2}, "100644")]
 
 
 def test_changes_keep_carriage_returns_inside_lines(repo: Repo) -> None:
@@ -289,6 +307,15 @@ def test_changes_mark_submodules(repo: Repo, tmp_path: Path) -> None:
     found = changes_of(repo, base)
     assert found[(head, "sub")].mode == _common.GITLINK_MODE
     assert found[(head, ".gitmodules")].added == {1, 2, 3}
+
+
+def test_changes_read_the_mode_of_merges_from_their_tree(repo: Repo) -> None:
+    base, merge = merge_resolving_a_submodule(repo)
+    repo.write("vendor/notes.txt", "kept\n")
+    after = repo.commit()
+    found = changes_of(repo, base)
+    assert found[(merge, "vendor/lib")].mode == _common.GITLINK_MODE
+    assert found[(after, "vendor/notes.txt")].mode == "100644"
 
 
 def test_changes_report_git_errors(repo: Repo) -> None:

@@ -38,7 +38,7 @@ import re
 import subprocess
 import sys
 from bisect import bisect_right
-from collections.abc import Callable, Iterable, Iterator
+from collections.abc import Callable, Collection, Iterable, Iterator
 from dataclasses import dataclass
 from itertools import pairwise
 from pathlib import Path, PurePosixPath
@@ -63,21 +63,31 @@ from ci_checks._common import (
     history_tip,
     load_event,
     matches_any,
+    mostly_printable,
     new_commit_range,
     pull_request,
     read_bytes,
+    replaced_head,
     require_full_history,
     split_lines,
     split_list,
     tracked_files,
 )
-from ci_checks.denylist import Denylist, denylist_sources, location
+from ci_checks.denylist import Denylist, denylist_sources
 from ci_checks.metadata import read_metadata
+from ci_checks.unpack import Part, data_uris, unpack
 
 DEFAULT_ALLOWED_DOMAINS = (
     "astral.sh",
+    # Namespaces and generator comments that SVG editors write: Sketch
+    # (bohemiancoding.com, sketchapp.com, sketch.com), Affinity Designer
+    # (serif.com), Boxy SVG and draw.io (drawio.com, diagrams.net).
+    "bohemiancoding.com",
+    "boxy-svg.com",
     "conventionalcommits.org",
     "creativecommons.org",
+    "diagrams.net",
+    "drawio.com",
     "github.com",
     "githubusercontent.com",
     "hacs.xyz",
@@ -93,7 +103,10 @@ DEFAULT_ALLOWED_DOMAINS = (
     "pythonhosted.org",
     "schemastore.org",
     "semver.org",
+    "serif.com",
     "shields.io",
+    "sketch.com",
+    "sketchapp.com",
     "sodipodi.sourceforge.net",
     "spdx.org",
     "w3.org",
@@ -192,7 +205,8 @@ PLACEHOLDER_HEX = {
 HEX_WORDS = ("babe", "bead", "beef", "c0de", "cafe", "d00d", "dead", "deaf", "f00d", "face", "feed")
 # Telephone blocks reserved for fiction and documentation: France (ARCEP, six
 # blocks of 10,000 numbers), North America (555-0100 to 555-0199, after the
-# area code) and the United Kingdom (Ofcom, 1,000 numbers in each block).
+# area code) and the United Kingdom (Ofcom drama numbers, 1,000 numbers in
+# each block).
 FICTION_NORTH_AMERICA = ("55501",)
 FICTION_PHONE_PREFIXES = (
     "3319900",
@@ -202,7 +216,9 @@ FICTION_PHONE_PREFIXES = (
     "3353649",
     "3363998",
     "441134960",
+    "441144960",
     "441154960",
+    "441164960",
     "441174960",
     "441184960",
     "441214960",
@@ -210,10 +226,19 @@ FICTION_PHONE_PREFIXES = (
     "441414960",
     "441514960",
     "441614960",
+    "441632960",
     "441914980",
     "442079460",
+    "442896496",
+    "442920180",
+    "443069990",
     "447700900",
+    "448081570",
+    "449098790",
 )
+# The length of the international numbers of the countries above. A fiction
+# number with more digits after it may hide a real number, so it is not exempt.
+_FICTION_LENGTHS = {"1": 11, "33": 11, "44": 12}
 # Hardware address ranges reserved for documentation (RFC 7042).
 DOCUMENTATION_MAC = ("00005e0053",)
 DOCUMENTATION_EUI64 = ("00005eef10",)
@@ -265,8 +290,16 @@ DENYLIST = "denylist"
 # coordinates spread over several lines is still found.
 CONTEXT_LINES = 5
 LFS_POINTER = b"version https://git-lfs.github.com/spec/v1\n"
-# License texts quote their authors' sites: LICENSE, LICENSE.md,
-# LICENSE-APACHE, COPYING.LESSER, NOTICE.txt and the like.
+# Documents and images keep text fields that only the metadata reader decodes
+# (escaped, compressed or binary), so they never read as text, even when most
+# of their bytes are printable: PDF, PNG, JPEG, TIFF and WebP files.
+_DOCUMENT = re.compile(
+    rb"%PDF|\x89PNG\r\n\x1a\n|\xff\xd8|II\*\x00|MM\x00\*|RIFF.{4}WEBP", re.DOTALL
+)
+# License texts quote their authors' sites and addresses, so these two
+# categories do not apply to them: LICENSE, LICENSE.md, LICENSE-APACHE,
+# COPYING.LESSER, NOTICE.txt and the like.
+LICENSE_EXEMPT_CATEGORIES = frozenset({"url", "email"})
 _LICENSE_FILE = re.compile(
     r"^(?i:licen[cs]e|copying|notice)(?:[-.][A-Z0-9][A-Za-z0-9.-]*)?(?:\.(?:md|rst|txt))?$"
 )
@@ -275,8 +308,11 @@ _IPV4 = re.compile(r"(?<![A-Za-z0-9.])(\d{1,3}(?:\.\d{1,3}){3})(?![A-Za-z0-9]|\.
 _IPV6 = re.compile(
     r"(?<![A-Za-z0-9:.%])([0-9A-Fa-f]{0,4}(?::[0-9A-Fa-f]{0,4}){2,7})(?![A-Za-z0-9:])"
 )
+# An address ends before an underscore, as in Markdown emphasis, and its @
+# may be percent-encoded, as in a query string.
 _EMAIL = re.compile(
-    r"(?<![A-Za-z0-9._%+-])[A-Za-z0-9._%+-]+@(?:[^\W_]|-)+(?:\.(?:[^\W_]|-)+)*\.[^\W\d_]{2,}\b"
+    r"(?<![A-Za-z0-9._%+-])([A-Za-z0-9._%+-]+)(?:@|%40)"
+    r"((?:[^\W_]|-)+(?:\.(?:[^\W_]|-)+)*\.[^\W\d_]{2,})(?![^\W_])"
 )
 _URL = re.compile(r"\b([A-Za-z][A-Za-z0-9+.-]{0,15})://(?:[^\s/@\"'<>]*@)?(\[[\w:.%]*\]|[\w.-]*)")
 # Separators between the digits of a phone number, including the no-break
@@ -288,14 +324,30 @@ _PHONE_INTERNATIONAL = re.compile(
     rf"(?<![\w+])(?:\+[1-9][\d(){_SEP[1:-1]}]{{6,22}}|00[1-9]\d{{0,2}}{_SEP}[\d(){_SEP[1:-1]}]{{5,20}})"
     r"\d(?!\w)"
 )
+_TRUNK_PREFIX = re.compile(r"\(0\)")
 # French numbers, in groups of two digits or written together. A group run
-# that goes on, as in a byte dump or a MAC address, is not a number.
+# that goes on, as in a byte dump or a MAC address, is not a number. A word
+# of two hex letters after the number, such as the French "de", only makes
+# a run when a group with a hex letter follows it, or two more groups do: a
+# single number after it starts a range of hours.
+_BYTE_AFTER = (
+    rf"{_SEP}(?:\d[0-9A-Fa-f]|[A-Fa-f]\d|[A-Fa-f]{{2}}{_SEP}"
+    rf"(?:[A-Fa-f][0-9A-Fa-f]|\d[A-Fa-f]|\d{{2}}{_SEP}[0-9A-Fa-f]{{2}}))(?![0-9A-Za-z])"
+)
 _PHONE_NATIONAL = re.compile(
     rf"(?<!\w)(?<!\d\.)(?<![0-9A-Fa-f]{{2}}{_SEP})"
-    rf"(?:0[1-9](?:{_SEP}\d{{2}}){{4}}(?!{_SEP}[0-9A-Fa-f]{{2}}(?![0-9A-Za-z]))|0[1-9]\d{{8}})"
+    rf"(?:0[1-9](?:{_SEP}\d{{2}}){{4}}(?!{_BYTE_AFTER})|0[1-9]\d{{8}})"
     r"(?!\w|\.\d)"
 )
-_PHONE_NORTH_AMERICA = re.compile(r"(?<![\w)])\(\d{3}\)[ \N{NO-BREAK SPACE}]?\d{3}-\d{4}(?![\w-])")
+# North American numbers: (NNN) NNN-NNNN, or groups of three, three and four
+# digits joined by the same hyphen or dot, with an area code and an exchange
+# that do not start with 0 or 1, as the numbering plan requires. The country
+# code 1 may come first, joined by the same separator.
+_PHONE_NORTH_AMERICA = re.compile(
+    r"(?<![\w)])\(\d{3}\)[ \N{NO-BREAK SPACE}]?\d{3}-\d{4}(?![\w-])"
+    r"|(?<![\w.+-])(?:1-(?=\d{3}-)|1\.(?=\d{3}\.))?"
+    r"[2-9]\d{2}([-.])[2-9]\d{2}\1\d{4}(?![\w-]|\.\d)"
+)
 _HOME_PATH = re.compile(
     r"(?<![\w.~%-])"
     r"(?:/home|/Users|/var/home|/run/media|/mnt/[A-Za-z]/(?i:users)"
@@ -310,9 +362,27 @@ _MAC_DOTTED = re.compile(
     r"(?<![0-9A-Fa-f.])([0-9A-Fa-f]{4}\.[0-9A-Fa-f]{4}\.[0-9A-Fa-f]{4})(?![0-9A-Fa-f.])"
 )
 # A key name starts a word, or a camel case part such as the "Mac" of
-# "wifiMac".
-_KEY_START = r"(?:(?<![A-Za-z])|(?<=[a-z])(?=[A-Z]))"
+# "wifiMac" or the "Address" of "IPAddress".
+_KEY_START = r"(?:(?<![A-Za-z])|(?<=[a-z])(?=[A-Z])|(?<=[A-Z])(?=[A-Z][a-z]))"
 _KEY_VALUE = r"[\"']?\s*[:=]\s*[\"']?"
+# A public IPv4 address looks like a version number, so it only counts next
+# to a key that names an address, which may be numbered: wan_ip, ipAddress,
+# IPADDR, "host", MQTT_BROKER, DNS1. A nameserver line of resolv.conf has
+# spaces between the key and the address.
+_IPV4_KEYED = re.compile(
+    _KEY_START
+    + r"(?:(?i:ip|ipv4|addr|address|ip(?:v4)?_?addr(?:ess)?|host|hostname|wan|server"
+    + r"|nameserver|broker|gateway|dns|router)\d?(?![a-z])"
+    + _KEY_VALUE
+    + r"|(?i:nameserver)[ \t]+)"
+    + _IPV4.pattern
+)
+# A version key or word right before four numbers makes them a version, as
+# in sw_version: "10.4.1.12" or firmware 10.2.0.15, not an address. Only
+# 10.0.0.0/8 holds such numbers, and fw or sw alone more often name a
+# firewall or a switch, whose address is personal.
+_VERSION_BEFORE = re.compile(_KEY_START + r"(?i:version|firmware|ver)[\s\"':=_-]{0,4}\Z")
+_VERSION_LIKE_NETWORK = ipaddress.ip_network("10.0.0.0/8")
 # Hex digits without separators are an address only next to a key that says so.
 _MAC_BARE = re.compile(
     _KEY_START
@@ -329,11 +399,37 @@ _EUI64_BARE = re.compile(
 )
 _COORDINATE = re.compile(
     _KEY_START
-    + r"(?i:lat|latitude|lon|lng|long|longitude)(?![a-z])"
+    + r"(?i:latitude|longitude|lat|lon|lng|(?<![\w-])long)(?![a-z])"
     + _KEY_VALUE
     + r"(-?\d{1,3}\.\d{3,})"
 )
-_COORDINATE_PAIR = re.compile(r"[\[(]\s*(-?\d{1,3}\.\d{5,})\s*,\s*(-?\d{1,3}\.\d{5,})\s*[\])]")
+# "long" at the end of a longer key also names a duration (DELAY_LONG,
+# PRESS_LONG), so there it only counts with a value that has the precision
+# and the size of a position.
+_COORDINATE_LONG = re.compile(
+    _KEY_START + r"(?i:(?<=[\w-])long)(?![a-z])" + _KEY_VALUE + r"(-?\d{1,3}\.\d{4,})"
+)
+# A pair in brackets of its own, with or without spaces.
+_COORDINATE_PAIR = re.compile(r"[\[(]\s*(-?\d{1,3}\.\d{4,})\s*,\s*(-?\d{1,3}\.\d{4,})\s*[\])]")
+# A pair written without a space and without brackets, as in query strings
+# (latlng=, q=), map links and plain values, but not a number of a longer
+# list. Map links go on with values that end with a unit: a zoom (15z), a
+# scale (500m) or the camera of a street view (3a,75y,90t).
+_COORDINATE_COMPACT = re.compile(
+    r"(?<![\w.,+\-\[(])(?<!, )(-?\d{1,3}\.\d{4,})(?:,|%2[Cc])(-?\d{1,3}\.\d{4,})"
+    r"(?:,\d{1,5}(?:\.\d+)?[a-z]){0,8}(?![\w.]|, ?-?\d|%2[Cc])"
+)
+# The first longitude, latitude and altitude of a KML coordinates element.
+_KML = re.compile(r"<(?:\w+:)?coordinates>\s*(-?\d{1,3}(?:\.\d+)?),\s*(-?\d{1,2}(?:\.\d+)?)")
+# A number or a lone letter next to a pair, across spaces: the pair is a
+# point of SVG path data (M 12.3456,7.8901 L ...) or of a list of points.
+_POINT_BEFORE = re.compile(r"(?:\d|(?<![A-Za-z])[A-Za-z])\s+\Z")
+_POINT_AFTER = re.compile(r"\s+(?:-?\.?\d|[A-Za-z](?![A-Za-z]))")
+# A bracket right after a name holds the arguments of a call, one after the
+# word "in" an interval (x in [0.25, 0.75]), and one after another bracket
+# or a comma, across spaces, a row of a list or a matrix. After any other
+# word and a space, it is a sentence such as "found at (...)".
+_CALL_OR_ROW_BEFORE = re.compile(r"(?:\w|\bin\s+|[\[(,]\s*)\Z")
 # A pair written in a sentence, as map applications copy it, but not a
 # number in a longer list.
 _COORDINATE_TEXT = re.compile(
@@ -391,41 +487,56 @@ def _is_generic(address: IPAddress) -> bool:
     return address in GENERIC_ADDRESSES or _in_any(address, GENERIC_NETWORKS)
 
 
+def _is_documentation(address: IPAddress) -> bool:
+    return _in_any(address, DOCUMENTATION_NETWORKS)
+
+
 def _is_personal_public(address: IPAddress) -> bool:
+    # Documentation addresses stand for public ones in examples, so only
+    # their own exemption tells them apart.
     return (
-        address.is_global
+        (address.is_global or _in_any(address, DOCUMENTATION_NETWORKS))
         and not address.is_multicast
         and address not in PUBLIC_RESOLVERS
         and not _is_generic(address)
-        and not _in_any(address, DOCUMENTATION_NETWORKS)
+        and not _is_documentation(address)
     )
 
 
 def _private_ip(text: str, _allowed: tuple[str, ...]) -> Iterator[Span]:
     for match in (*_IPV4.finditer(text), *_IPV6.finditer(text)):
         address = _parse_ip(match.group(1))
-        if address is not None and _in_any(address, PRIVATE_NETWORKS) and not _is_generic(address):
+        if address is None or not _in_any(address, PRIVATE_NETWORKS) or _is_generic(address):
+            continue
+        if address not in _VERSION_LIKE_NETWORK or not _VERSION_BEFORE.search(
+            text, max(0, match.start() - 16), match.start()
+        ):
             yield match.span(1)
 
 
 def _public_ip(text: str, _allowed: tuple[str, ...]) -> Iterator[Span]:
-    # Public IPv4 addresses look like version numbers, so only IPv6 is checked
-    # here; public addresses of both kinds are also caught in URLs.
+    # Public IPv4 addresses look like version numbers, so they only count
+    # next to a key that names an address; public addresses of both kinds
+    # are also caught in URLs.
     for match in _IPV6.finditer(text):
         address = _parse_ip(match.group(1))
         if address is not None and address in GLOBAL_IPV6 and _is_personal_public(address):
+            yield match.span(1)
+    for match in _IPV4_KEYED.finditer(text):
+        address = _parse_ip(match.group(1))
+        if address is not None and _is_personal_public(address):
             yield match.span(1)
 
 
 def _email(text: str, allowed: tuple[str, ...]) -> Iterator[Span]:
     for match in _EMAIL.finditer(text):
-        local, _, domain = match.group(0).rpartition("@")
+        local, domain = match.groups()
         after = text[match.end() : match.end() + 2]
         if local.lower() == "git" and after[:1] == ":" and after[1:2].strip():
             continue  # SSH remote such as git@github.com:owner/repo.
         if domain.rpartition(".")[2].lower() in FILE_EXTENSIONS:
             continue  # File name such as icon@2x.png.
-        if not is_noreply_email(match.group(0), allowed):
+        if not is_noreply_email(f"{local}@{domain}", allowed):
             yield match.span()
 
 
@@ -439,14 +550,19 @@ def _is_placeholder_number(digits: str) -> bool:
 
 
 def _is_fiction(international: str) -> bool:
-    if international.startswith("1") and len(international) == 11:
+    for code, length in _FICTION_LENGTHS.items():
+        if international.startswith(code) and len(international) != length:
+            return False
+    if international.startswith("1"):
         return international[4:].startswith(FICTION_NORTH_AMERICA)
     return international.startswith(FICTION_PHONE_PREFIXES)
 
 
 def _phone(text: str, _allowed: tuple[str, ...]) -> Iterator[Span]:
     for match in _PHONE_INTERNATIONAL.finditer(text):
-        digits = re.sub(r"[^0-9]", "", match.group(0)).removeprefix("00")
+        # The trunk prefix, as in +44 (0)20, is not dialled from abroad.
+        number = _TRUNK_PREFIX.sub("", match.group(0), count=1)
+        digits = re.sub(r"[^0-9]", "", number).removeprefix("00")
         if (
             8 <= len(digits) <= 15
             and not _is_fiction(digits)
@@ -458,7 +574,7 @@ def _phone(text: str, _allowed: tuple[str, ...]) -> Iterator[Span]:
         if not _is_fiction("33" + digits[1:]) and not _is_placeholder_number(digits):
             yield match.span()
     for match in _PHONE_NORTH_AMERICA.finditer(text):
-        digits = re.sub(r"[^0-9]", "", match.group(0))
+        digits = re.sub(r"[^0-9]", "", match.group(0))[-10:]
         if not _is_fiction("1" + digits) and not _is_placeholder_number(digits):
             yield match.span()
 
@@ -582,15 +698,37 @@ def _is_location(first: str, second: str) -> bool:
     return in_range and (_real_coordinate(first) or _real_coordinate(second))
 
 
+def _is_other_pair(text: str, match: re.Match[str], pattern: re.Pattern[str]) -> bool:
+    """Return whether a pair of numbers is written as something else than a position."""
+    before = text[max(0, match.start() - 16) : match.start()]
+    if _SVG_TRANSFORM.search(before):
+        return True  # An SVG transform such as translate(12.34567, 45.67891).
+    if pattern is _COORDINATE_COMPACT:
+        return bool(_POINT_BEFORE.search(before) or _POINT_AFTER.match(text, match.end()))
+    if pattern is not _COORDINATE_PAIR:
+        return False
+    # Four decimals are common in other numbers, so a pair that has no more
+    # than that only counts in brackets of its own, and with as many decimals
+    # in both values as a position rounded or copied by hand has.
+    decimals = {len(value.partition(".")[2]) for value in match.groups()}
+    if min(decimals) >= 5:
+        return False
+    # The previous row may end a line above, behind the indentation.
+    return len(decimals) > 1 or bool(
+        _CALL_OR_ROW_BEFORE.search(text, max(0, match.start() - 80), match.start())
+    )
+
+
 def _coordinates(text: str, _allowed: tuple[str, ...]) -> Iterator[Span]:
     for match in _COORDINATE.finditer(text):
         if _real_coordinate(match.group(1)):
             yield match.span(1)
-    for pattern in (_COORDINATE_PAIR, _COORDINATE_TEXT, _GEO_URI):
+    for match in _COORDINATE_LONG.finditer(text):
+        if _real_coordinate(match.group(1)) and abs(float(match.group(1))) >= 1:
+            yield match.span(1)
+    for pattern in (_COORDINATE_PAIR, _COORDINATE_TEXT, _COORDINATE_COMPACT, _GEO_URI, _KML):
         for match in pattern.finditer(text):
-            if _SVG_TRANSFORM.search(text, max(0, match.start() - 16), match.start()):
-                continue  # An SVG transform such as translate(12.34567, 45.67891).
-            if _is_location(match.group(1), match.group(2)):
+            if not _is_other_pair(text, match, pattern) and _is_location(*match.groups()):
                 yield match.span()
 
 
@@ -605,20 +743,29 @@ _FINDERS: dict[str, Callable[[str, tuple[str, ...]], Iterator[Span]]] = {
     "device-id": _device_id,
     "coordinates": _coordinates,
 }
+GENERIC_CATEGORIES = frozenset(_FINDERS)
+# The categories that a file path or a branch name can hold: a path relative
+# to the repository cannot hold a URL or start at a home directory.
+PATH_CATEGORIES = GENERIC_CATEGORIES - {"url", "home-path"}
 _ORDER = {name: index for index, name in enumerate((DENYLIST, *_FINDERS))}
 
 
-def generic_spans(text: str, allowed_domains: Iterable[str]) -> Iterator[tuple[str, Span]]:
+def generic_spans(
+    text: str, allowed_domains: Iterable[str], categories: Collection[str] = GENERIC_CATEGORIES
+) -> Iterator[tuple[str, Span]]:
     """Yield the category and position of each piece of personal data in a text."""
     allowed = tuple(allowed_domains)
     for name, finder in _FINDERS.items():
-        for span in finder(text, allowed):
-            yield name, span
+        if name in categories:
+            for span in finder(text, allowed):
+                yield name, span
 
 
-def generic_findings(text: str, allowed_domains: Iterable[str]) -> list[str]:
+def generic_findings(
+    text: str, allowed_domains: Iterable[str], categories: Collection[str] = GENERIC_CATEGORIES
+) -> list[str]:
     """Return the categories of personal data found in a piece of text."""
-    found = {name for name, _ in generic_spans(text, allowed_domains)}
+    found = {name for name, _ in generic_spans(text, allowed_domains, categories)}
     return [name for name in _FINDERS if name in found]
 
 
@@ -644,10 +791,18 @@ def is_lfs_pointer(data: bytes) -> bool:
 def _text(data: bytes) -> str | None:
     """Return the text of a file, or None for binary content and documents.
 
-    A PDF file can be plain ASCII, but it writes its text fields with escapes
-    that only the metadata reader decodes.
+    A stray NUL byte does not make a text file binary, which would weaken
+    the denylist matching: content that reads as text once its NUL bytes are
+    dropped, in UTF-8 or in the legacy encoding that decode_text falls back
+    to, is text.
     """
-    return None if data.startswith(b"%PDF") else decode_text(data)
+    if _DOCUMENT.match(data):
+        return None
+    text = decode_text(data)
+    if text is not None:
+        return text
+    text = decode_text(data.replace(b"\0", b""))
+    return text if text is not None and mostly_printable(text) else None
 
 
 def _regions(added: Iterable[int], count: int, context: int) -> list[tuple[int, int]]:
@@ -660,6 +815,14 @@ def _regions(added: Iterable[int], count: int, context: int) -> list[tuple[int, 
         else:
             regions.append((start, end))
     return regions
+
+
+def _unreadable_size() -> str:
+    """Return why a file over the scan limit fails, read when the message is made."""
+    return (
+        f"larger than {MAX_SCAN_BYTES} bytes, so its content cannot be checked. Keep large "
+        "files out of the repository, for example by downloading them when they are needed."
+    )
 
 
 class PrivacyCheck:
@@ -680,19 +843,59 @@ class PrivacyCheck:
         self.reporter = reporter
         self._current: dict[str, list[str]] = {}
 
-    def _generic_applies(self, path: str) -> bool:
+    def _generic_categories(self, path: str) -> frozenset[str]:
+        """Return the generic categories that apply to a file."""
         shown = display_path(path)
-        return not matches_any(shown, self.exclude) and not is_license_file(shown)
+        if matches_any(shown, self.exclude):
+            return frozenset()
+        if is_license_file(shown):
+            return GENERIC_CATEGORIES - LICENSE_EXEMPT_CATEGORIES
+        return GENERIC_CATEGORIES
 
-    def findings(self, text: str, generic: bool) -> list[Finding]:
-        """Return what a text holds, by line, after the `ci-allow` comments."""
+    def _path(self, path: str, categories: Collection[str]) -> tuple[str, str | None, list[str]]:
+        """Return the path to show, the path to annotate, and what the path holds.
+
+        What a path holds is the denylist and the categories of PATH_CATEGORIES
+        found in it. The parts of the path that hold them are redacted, and
+        the annotation is dropped, because the runner prints it as given.
+        """
+        name = display_path(path)
+        kinds = PATH_CATEGORIES & set(categories)
+        held = generic_findings(name, self.allowed_domains, kinds)
+        if self.denylist.matches(name):
+            held.insert(0, DENYLIST)
+        if not held:
+            return name, name, held
+        # A term can span several parts, which the denylist only sees in the
+        # whole path, so it redacts first. None of the generic categories can
+        # match across a slash, so redacting each part that holds one hides it.
+        parts = [
+            "[redacted]" if generic_findings(part, self.allowed_domains, kinds) else part
+            for part in PurePosixPath(self.denylist.redact_path(name)).parts
+        ]
+        return "/".join(parts), None, held
+
+    def _report_path(self, where: str, held: list[str], advice: str) -> None:
+        for category in held:
+            if category == DENYLIST:
+                self.reporter.error(f"{where}: the file path contains a denylisted term.")
+            else:
+                self.reporter.error(
+                    f"{where}: the file path may contain personal data ({category}){advice}"
+                )
+
+    def findings(self, text: str, categories: Collection[str]) -> list[Finding]:
+        """Return what a text holds, by line, after the `ci-allow` comments.
+
+        The denylist always applies; `categories` are the generic ones that do.
+        """
         found: dict[tuple[int, str], Finding] = {}
         for first, last in self.denylist.spans(text):
             found.setdefault((first, DENYLIST), Finding(first, last, DENYLIST))
-        if generic:
+        if categories:
             lines = split_lines(text)
             starts = [0, *(match.end() for match in re.finditer("\n", text))]
-            for category, (start, end) in generic_spans(text, self.allowed_domains):
+            for category, (start, end) in generic_spans(text, self.allowed_domains, categories):
                 first = bisect_right(starts, start)
                 last = bisect_right(starts, max(start, end - 1))
                 if any(allowed_by_pragma(line, category) for line in lines[first - 1 : last]):
@@ -700,29 +903,32 @@ class PrivacyCheck:
                 found.setdefault((first, category), Finding(first, last, category))
         return sorted(found.values(), key=lambda f: (f.first, _ORDER[f.category]))
 
-    def _categories(self, text: str) -> list[str]:
+    def _categories(self, text: str, categories: Collection[str] = GENERIC_CATEGORIES) -> list[str]:
         """Return the generic categories of a message, after its `ci-allow` comments."""
-        found = {f.category for f in self.findings(text, generic=True)} - {DENYLIST}
+        found = {f.category for f in self.findings(text, categories)} - {DENYLIST}
         return sorted(found, key=_ORDER.__getitem__)
 
     def check_files(self, paths: Iterable[str]) -> None:
         """Check file paths, symbolic link targets and file contents."""
         for path in paths:
-            shown, annotated = location(self.denylist, display_path(path))
-            if annotated is None:
-                self.reporter.error(f"{shown}: the file path contains a denylisted term.")
+            categories = self._generic_categories(path)
+            shown, annotated, held = self._path(path, categories)
+            self._report_path(
+                shown,
+                held,
+                ". Rename the file, or exclude it from the generic patterns if the name is "
+                "not personal.",
+            )
             full = self.root / path
             if full.is_symlink():
-                self._check_symlink(path, str(full.readlink()))
+                self._check_symlink(shown, annotated, categories, str(full.readlink()))
                 continue
             if full.is_dir():
                 continue  # A submodule, whose URL is checked in .gitmodules.
             data = read_bytes(full, MAX_SCAN_BYTES)
             if data is None:
                 if full.exists():
-                    self.reporter.warning(
-                        f"{shown}: larger than {MAX_SCAN_BYTES} bytes, not scanned."
-                    )
+                    self.reporter.error(f"{shown}: {_unreadable_size()}", annotated)
                 else:
                     self.reporter.error(f"{shown}: tracked but missing from the checkout.")
                 continue
@@ -734,11 +940,10 @@ class PrivacyCheck:
                 )
                 continue
             text = _text(data)
-            generic = self._generic_applies(path)
             if text is None:
-                self._check_binary(shown, annotated, data, generic)
+                self._check_binary(shown, annotated, data, categories)
                 continue
-            for finding in self.findings(text, generic):
+            for finding in self.findings(text, categories):
                 number = finding.first
                 if finding.category == DENYLIST:
                     self.reporter.error(f"{shown}:{number}: denylisted term.", annotated, number)
@@ -750,40 +955,87 @@ class PrivacyCheck:
                     annotated,
                     number,
                 )
+            self._check_data_uris(shown, annotated, text, categories)
 
-    def _check_binary(self, where: str, annotated: str | None, data: bytes, generic: bool) -> None:
-        metadata = read_metadata(data)
-        if self.denylist.matches_binary(data) or any(map(self.denylist.matches, metadata.texts)):
-            self.reporter.error(f"{where}: binary content contains a denylisted term.", annotated)
-        if not generic:
-            return
-        found = {"coordinates"} if metadata.location else set()
-        for text in metadata.texts:
-            found.update(generic_findings(text, self.allowed_domains))
-        for category in METADATA_CATEGORIES:
+    def _check_binary(
+        self,
+        where: str,
+        annotated: str | None,
+        data: bytes,
+        categories: Collection[str],
+        line: int | None = None,
+    ) -> None:
+        """Check binary content, its metadata and the content it holds compressed.
+
+        Content that cannot be read whole fails, because it could hide a term.
+        """
+        unpacked = unpack(data)
+        contents = [Part(data), *unpacked.parts]
+        metadata = [read_metadata(part.data, part.pdf) for part in contents]
+        texts = [text for found in metadata for text in found.texts]
+        if any(self.denylist.matches_binary(part.data) for part in contents) or any(
+            map(self.denylist.matches, texts)
+        ):
+            self.reporter.error(
+                f"{where}: binary content contains a denylisted term.", annotated, line
+            )
+        if unpacked.problem:
+            self.reporter.error(
+                f"{where}: the compressed content {unpacked.problem}, so it cannot be checked.",
+                annotated,
+                line,
+            )
+        if any(found.truncated for found in metadata):
+            self.reporter.error(
+                f"{where}: the file metadata is too large to be checked whole. Remove the "
+                "metadata, for example by exporting the file again without it.",
+                annotated,
+                line,
+            )
+        wanted = [category for category in METADATA_CATEGORIES if category in categories]
+        found = {"coordinates"} if any(found.location for found in metadata) else set()
+        for text in texts:
+            found.update(generic_findings(text, self.allowed_domains, wanted))
+        for category in wanted:
             if category in found:
                 self.reporter.error(
                     f"{where}: the file metadata may contain personal data ({category}). "
                     "Remove the metadata, for example by exporting the file again without it.",
                     annotated,
+                    line,
                 )
 
-    def _check_symlink(self, path: str, target: str) -> None:
-        shown, annotated = location(self.denylist, display_path(path))
+    def _check_data_uris(
+        self,
+        where: str,
+        annotated: str | None,
+        text: str,
+        categories: Collection[str],
+        numbers: Collection[int] | None = None,
+    ) -> None:
+        """Check the content of the base64 data URIs of a text, on the given lines only."""
+        starts = [0, *(match.end() for match in re.finditer("\n", text))]
+        for offset, data in data_uris(text):
+            number = bisect_right(starts, offset)
+            if numbers is None or number in numbers:
+                shown = f"{where}:{number}: embedded data"
+                self._check_binary(shown, annotated, data, categories, number)
+
+    def _check_symlink(
+        self, shown: str, annotated: str | None, categories: Collection[str], target: str
+    ) -> None:
         target = display_path(target)
         if self.denylist.matches(target):
             self.reporter.error(f"{shown}: the link target contains a denylisted term.", annotated)
-        if self._generic_applies(path):
-            for category in generic_findings(target, self.allowed_domains):
-                self.reporter.error(
-                    f"{shown}: the link target may contain personal data ({category}).",
-                    annotated,
-                )
+        for category in generic_findings(target, self.allowed_domains, categories):
+            self.reporter.error(
+                f"{shown}: the link target may contain personal data ({category}).", annotated
+            )
 
     def _current_lines(self, path: str) -> list[str]:
         if path not in self._current:
             data = read_bytes(self.root / path, MAX_SCAN_BYTES)
-            text = decode_text(data) if data is not None else None
+            text = _text(data) if data is not None else None
             self._current[path] = split_lines(text) if text is not None else []
         return self._current[path]
 
@@ -796,48 +1048,48 @@ class PrivacyCheck:
         """
         written = [change for change in written if change.mode != GITLINK_MODE]
         contents = blob_contents(self.root, (c.blob for c in written if c.blob), MAX_SCAN_BYTES)
-        reported_paths = set()
         for change in written:
             if not change.blob:
                 continue  # A deletion, which adds nothing.
-            short = change.sha[:12]
-            shown, _ = location(self.denylist, display_path(change.path))
-            if shown != display_path(change.path) and (short, change.path) not in reported_paths:
-                reported_paths.add((short, change.path))
-                self.reporter.error(f"Commit {short}: a file path contains a denylisted term.")
-            where = f"Commit {short}: {shown}"
+            categories = (
+                frozenset() if change.sha in exempt else self._generic_categories(change.path)
+            )
+            shown, _, held = self._path(change.path, categories)
+            where = f"Commit {change.sha[:12]}: {shown}"
+            self._report_path(where, held, ", even if a later commit renamed the file.")
             if change.blob not in contents:
                 self.reporter.error(f"{where}: the content could not be read from the repository.")
                 continue
             data = contents[change.blob]
             if data is None:
-                self.reporter.warning(f"{where}: larger than {MAX_SCAN_BYTES} bytes, not scanned.")
+                self.reporter.error(f"{where}: {_unreadable_size()}")
                 continue
             if is_lfs_pointer(data):
                 self.reporter.error(
                     f"{where}: stored with Git LFS, so its content cannot be checked."
                 )
                 continue
-            generic = change.sha not in exempt and self._generic_applies(change.path)
             text = _text(data)
             if text is None:
-                self._check_binary(where, None, data, generic)
+                self._check_binary(where, None, data, categories)
                 if self._adds_allow_marker(change, data):
                     self.reporter.warning(
                         f"{where}: gitleaks:allow in binary content hides lines from the "
                         "secret scan. Reviewers must confirm that the file holds no secret."
                     )
                 continue
-            self._check_added(where, change, split_lines(text), generic)
+            self._check_added(where, change, split_lines(text), categories)
 
-    def _check_added(self, where: str, change: Change, lines: list[str], generic: bool) -> None:
+    def _check_added(
+        self, where: str, change: Change, lines: list[str], categories: Collection[str]
+    ) -> None:
         added = change.added
         current = self._current_lines(change.path)
         context = max(CONTEXT_LINES, self.denylist.longest_term)
         regions = [(1, len(lines))] if added is None else _regions(added, len(lines), context)
         for start, end in regions:
             block = "\n".join(lines[start - 1 : end])
-            for finding in self.findings(block, generic):
+            for finding in self.findings(block, categories):
                 span = range(finding.first + start - 1, finding.last + start)
                 if added is not None and not any(number in added for number in span):
                     continue
@@ -850,6 +1102,12 @@ class PrivacyCheck:
                         f"{where}:{span[0]}: an added line may contain personal data "
                         f"({finding.category}), even if a later commit removed it."
                     )
+        new = {
+            number
+            for number in (range(1, len(lines) + 1) if added is None else added)
+            if not 0 < number <= len(current) or current[number - 1] != lines[number - 1]
+        }
+        self._check_data_uris(where, None, "\n".join(lines), categories, new)
         for number in range(1, len(lines) + 1) if added is None else sorted(added):
             if 0 < number <= len(lines) and "gitleaks:allow" in lines[number - 1]:
                 self.reporter.warning(
@@ -915,12 +1173,16 @@ class PrivacyCheck:
         for name, value in fields:
             if self.denylist.matches(value):
                 self.reporter.error(f"Pull request {name} contains a denylisted term.")
-        texts = [("title", pr.title)]
+        texts = [("title", pr.title, GENERIC_CATEGORIES)]
         if not pr.is_dependency_bot:
-            # Dependency bots quote upstream release notes in the body.
-            texts.append(("body", pr.body))
-        for name, value in texts:
-            for category in self._categories(value):
+            # Dependency bots quote upstream release notes in the body, and
+            # name their branches after package versions.
+            texts += [
+                ("body", pr.body, GENERIC_CATEGORIES),
+                ("branch name", pr.head_ref, PATH_CATEGORIES),
+            ]
+        for name, value, categories in texts:
+            for category in self._categories(value, categories):
                 self.reporter.error(f"Pull request {name} may contain personal data ({category}).")
 
 
@@ -998,6 +1260,13 @@ def main(argv: list[str] | None = None) -> int:
         require_full_history(args.root)
     except CheckError as err:
         return fail(str(err))
+    replaced = replaced_head(event, args.root)
+    if replaced:
+        reporter.warning(
+            f"The pull request branch was force pushed. The commits it replaced, up to "
+            f"{replaced[:12]}, stay reachable on GitHub but are not checked again: if they "
+            "held personal data or a secret, tell a maintainer."
+        )
     check = PrivacyCheck(
         args.root,
         denylist,
