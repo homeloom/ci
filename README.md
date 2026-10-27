@@ -68,6 +68,7 @@ silently checking less.
 | `license-requirements` | | Extra runtime requirements files whose licenses are checked. |
 | `license-allowed` | | SPDX identifiers that replace the default allowed list. |
 | `license-exceptions` | | Packages exempted after a manual license review. |
+| `license-python-version` | `3.14` | Python version used to resolve the runtime dependencies. |
 
 The calling job grants `contents: read` and `pull-requests: read`. The
 second lets the checks read the current pull request title and body: a run
@@ -198,13 +199,17 @@ The **Hygiene** job checks:
     `languages/` folders that hold data or documentation, or whose name or
     folder is a language code (`locales/fr.js`, `locales/fr/common.js`);
   - gettext catalogs;
-  - documents named after their language (`README.fr.md`, `README_fr.md`)
-    next to their English original (`README.md`);
+  - documents named after their language (`README.fr.md`, `README_fr.md`,
+    `README_FR.md`, or `DOCS_fr.md` for a name in capitals) next to their
+    English original (`README.md`);
   - pages under `docs/<language>/` whose English version exists under
     `docs/en/`.
 
   Language codes are also common folder names (`docs/os/` for Home
   Assistant OS), so a translation without its English original is checked.
+  Codes that file names more often use for something else (`ha`, `os`,
+  `to`, `is`, `be`, `as`, `an`, `am`, `or`, `so`) never make a document a
+  translation, so `docs/install.ha.md` is checked.
   Translations kept elsewhere, such as at the root of `docs/`, need
   `english-exclude`.
 - **Workflows**: actionlint with shellcheck.
@@ -212,10 +217,15 @@ The **Hygiene** job checks:
 The first push of a branch, a force push and a manual run check every commit
 of the history as new.
 
-The **Licenses** job checks that the LICENSE file matches the expected
-license and that every runtime dependency (manifest `requirements` and
+The **Licenses** job checks that the LICENSE file holds the text of the
+expected license and that every runtime dependency (manifest
+`requirements`, the `requirements.txt` of each Home Assistant app, and
 extra requirements files, transitive dependencies included) has an allowed
-license. Installing packages may run their build code, so this job runs
+license. An app is a folder, at the root or one level down, that holds a
+`Dockerfile` and a `config.yaml`, `config.yml` or `config.json`. The
+LICENSE file is compared with phrases of the common permissive, GNU and
+Mozilla licenses, in any case; for another identifier, the job warns that
+it did not compare the file. Installing packages may run their build code, so this job runs
 separately and never receives the denylist secret. How a license is read:
 
 - `License-Expression` is used as written.
@@ -229,11 +239,18 @@ separately and never receives the denylist secret. How a license is read:
 - If the field accounts for no classifier, the classifiers decide, unless
   the field names Commons Clause, proprietary or non-commercial terms, or a
   GNU license that no classifier names: it is then reported as written and
-  fails.
+  fails. A field that names licenses the classifiers contradict, such as
+  `BUSL-1.1` next to the MIT classifier, is combined with them with AND, so
+  both must be allowed; loose words such as "Custom" or "BSD-like" leave
+  the classifiers to decide.
 - A one-line `License` field is read as a license name or expression.
   Known names are translated (for example "3-Clause BSD License" becomes
-  `BSD-3-Clause`), and `and` and `or` in any case are operators. A one-line
-  field that cannot be translated is reported as written and fails.
+  `BSD-3-Clause`), and `and` and `or` in any case are operators. The name
+  of a GNU classifier and short names such as `LGPLv3+`, `GPLv2` or `MPL2`
+  are translated too. A one-line field that cannot be translated is
+  reported as written and fails. A classifier without an SPDX identifier
+  becomes a `LicenseRef`, which is not allowed until the package is
+  exempted.
 - A multi-line `License` field is read as a full license text. It is
   recognized only from phrases of the MIT, BSD and Apache 2.0 texts, only
   if it names no GNU license and no restriction, and only if its first line,
@@ -334,18 +351,21 @@ Limits:
 | Input | Default | Description |
 | --- | --- | --- |
 | `homeassistant-minimum` | `homeassistant` in `hacs.json` | Oldest supported Home Assistant version. |
-| `python-minimum` | `3.13` | Python used with the oldest version. Set it to `3.14` when the oldest version is Home Assistant 2026.3 or later, which requires Python 3.14.2 or later. |
+| `python-minimum` | the oldest Python the oldest version supports | Python used with the oldest version, from 3.12 to `python-latest`. |
 | `python-latest` | `3.14` | Python used with the latest version. |
 | `requirements` | `requirements_test.txt` | Test requirements, installed when the file exists. |
 | `coverage-source` | `custom_components` | Package or directory measured for coverage, as pytest imports or finds it (for example `custom_components`, `./custom_components`, or a package under `src/` with pytest `pythonpath = src`). |
 | `coverage-minimum` | `95` | Minimum total coverage in percent. Lowering it needs a written justification in the pull request. |
 
 The workflow picks the versions of `homeassistant` and
-`pytest-homeassistant-custom-component` (0.13 or later, so the oldest
-version is Home Assistant 2023.3 or later), so the test requirements must
-not pin them. Runtime requirements from the manifests are
-installed too. The job fails with a clear error when the oldest version
-requires another Python than `python-minimum`.
+`pytest-homeassistant-custom-component`, so the test requirements must not
+pin them. The latest leg takes the latest releases (0.13 or later of the
+plugin). The minimum leg takes the oldest version and the plugin release
+that pins it, and fails with the versions that nearby plugin releases pin
+when none does. Its Python is the oldest one that the oldest version
+supports, and the job fails with a clear error when `python-minimum` names
+one it does not. Runtime requirements from the manifests are installed
+too.
 
 Coverage ignores the coverage settings of the repository, including `--cov`
 options in the pytest configuration. Only lines marked
@@ -369,8 +389,12 @@ event carries no repository, get it right too.
 | --- | --- | --- |
 | `paths` | required | JSON array of app directories. |
 
-The image base comes from `build_from.amd64` in `build.yaml` or `build.json`
-when present.
+The image is built with the build arguments that the Supervisor passes:
+`BUILD_FROM` is `build_from` of `build.yaml`, `build.yml` or `build.json`
+(one image, or the `amd64` entry of a map), or the Home Assistant base image
+when it is missing; `BUILD_ARCH` is `amd64`; `BUILD_VERSION` is the
+`version` of the app configuration; and the `args` of the build file come
+last.
 
 ### release.yml
 
@@ -385,7 +409,9 @@ when present.
 
 Call it from a workflow triggered by `workflow_run` after CI succeeds on a
 push to `main` (see the templates). Versions with a pre-release suffix are
-published as pre-releases.
+published as pre-releases. A tag that already exists must be this commit's
+release: a tag on another commit, or one without a GitHub release, fails
+the job instead of leaving the version unreleased.
 
 Without an asset, a single Release job runs, as in earlier versions. With
 `asset-path` and `asset-name`:

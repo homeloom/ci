@@ -143,29 +143,68 @@ def test_pragma_with_reason_excludes_code(repo: Repo, tmp_path: Path) -> None:
     assert run_step(repo, tmp_path, "Check coverage pragmas").returncode == 0
 
 
-def select(repo: Repo, tmp_path: Path, leg: str, requires: str) -> tuple[int, str, str]:
-    """Run the version selection step with a fake PyPI answer.
+PLUGIN_NAME = "pytest-homeassistant-custom-component"
+RELEASED = "2026-03-04T12:00:00.000000Z"
+
+
+def fake_pypi(root: Path, requires: str, plugins: dict[str, tuple[str, str]]) -> Path:
+    """Write the PyPI answers for Home Assistant 2026.3.0 and plugin releases.
+
+    plugins maps each plugin version to the Home Assistant version it pins
+    and its upload time.
+    """
+
+    def answer(path: str, data: dict) -> None:
+        target = root / path / "json"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(json.dumps(data), encoding="utf-8")
+
+    answer(
+        "homeassistant/2026.3.0",
+        {"info": {"requires_python": requires}, "urls": [{"upload_time_iso_8601": RELEASED}]},
+    )
+    files = {number: [{"upload_time_iso_8601": when}] for number, (_, when) in plugins.items()}
+    answer(PLUGIN_NAME, {"releases": {**files, "0.1.0": []}})
+    for number, (pinned, _) in plugins.items():
+        answer(
+            f"{PLUGIN_NAME}/{number}",
+            {"info": {"requires_dist": ["pytest==9.0.0", f"homeassistant=={pinned}"]}},
+        )
+    return root
+
+
+PINNED = {
+    "0.13.300": ("2026.2.3", "2026-02-20T08:00:00Z"),
+    "0.13.301": ("2026.3.0b4", "2026-03-03T08:00:00Z"),
+    "0.13.302": ("2026.3.0", "2026-03-05T08:00:00Z"),
+    "0.13.303": ("2026.3.1", "2026-03-12T08:00:00Z"),
+}
+
+
+def select(
+    repo: Repo,
+    tmp_path: Path,
+    leg: str,
+    requires: str = ">=3.13.2",
+    python: str = "",
+    plugins: dict[str, tuple[str, str]] = PINNED,
+) -> tuple[int, str, str]:
+    """Run the version selection step with fake PyPI answers.
 
     Return the exit status, the output and the step outputs.
     """
-    fake = tmp_path / "bin"
-    fake.mkdir()
-    release = {
-        "info": {"requires_python": requires},
-        "urls": [{"upload_time_iso_8601": "2026-03-04T12:00:00.000000Z"}],
-    }
-    curl = fake / "curl"
-    curl.write_text(f"#!/bin/sh\ncat <<'EOF'\n{json.dumps(release)}\nEOF\n", encoding="utf-8")
-    curl.chmod(0o755)
+    pypi = fake_pypi(tmp_path / "pypi", requires, plugins)
     outputs = tmp_path / "outputs"
     result = run_step(
         repo,
         tmp_path,
-        "Select Home Assistant version",
-        bin_dir=fake,
+        "Select versions",
         extra={
             "LEG": leg,
             "MINIMUM": "2026.3.0",
+            "PYTHON_MINIMUM": python,
+            "PYTHON_LATEST": "3.14",
+            "PYPI_URL": pypi.as_uri(),
             "GITHUB_OUTPUT": str(outputs),
             "PLUGIN": workflow_env("PLUGIN"),
         },
@@ -174,34 +213,82 @@ def select(repo: Repo, tmp_path: Path, leg: str, requires: str) -> tuple[int, st
     return result.returncode, result.stdout + result.stderr, written
 
 
-def test_minimum_leg_selects_the_release_and_a_cutoff(repo: Repo, tmp_path: Path) -> None:
-    major, minor = sys.version_info[:2]
-    status, output, written = select(
-        repo, tmp_path, "minimum", f">={major}.{minor}.0,<{major}.{minor + 1},!={major}.0.1"
-    )
+def test_minimum_leg_selects_the_release_its_plugin_and_python(repo: Repo, tmp_path: Path) -> None:
+    status, output, written = select(repo, tmp_path, "minimum")
     assert status == 0, output
     assert "spec=homeassistant==2026.3.0\n" in written
+    assert f"plugin={PLUGIN_NAME}==0.13.302\n" in written
+    # The oldest Python that the release supports, at its newest patch.
+    assert "python=3.13\n" in written
     assert "cutoff=2026-03-11T12:00:00Z\n" in written
 
 
-@pytest.mark.parametrize("bound", [">={major}.{next}", ">={major}.{minor}.99", "<{major}.{minor}"])
-def test_minimum_leg_fails_when_the_release_excludes_the_python(
-    repo: Repo, tmp_path: Path, bound: str
+def test_minimum_leg_waits_for_a_late_plugin_release(repo: Repo, tmp_path: Path) -> None:
+    late = {"0.13.302": ("2026.3.0", "2026-03-15T08:00:00Z")}
+    status, output, written = select(repo, tmp_path, "minimum", plugins=late)
+    assert status == 0, output
+    assert "cutoff=2026-03-16T08:00:00Z\n" in written
+
+
+@pytest.mark.parametrize(
+    ("requires", "python"),
+    [(">=3.12", "3.12"), (">=3.14.0", "3.14"), (">=3.13.2,<3.15", "3.13"), ("", "3.12")],
+)
+def test_minimum_leg_derives_the_python(
+    repo: Repo, tmp_path: Path, requires: str, python: str
 ) -> None:
-    major, minor = sys.version_info[:2]
-    requires = bound.format(major=major, minor=minor, next=minor + 1)
     status, output, written = select(repo, tmp_path, "minimum", requires)
+    assert status == 0, output
+    assert f"python={python}\n" in written
+
+
+def test_minimum_leg_keeps_a_python_that_fits(repo: Repo, tmp_path: Path) -> None:
+    status, output, written = select(repo, tmp_path, "minimum", ">=3.13.2", "3.14")
+    assert status == 0, output
+    assert "python=3.14\n" in written
+
+
+@pytest.mark.parametrize(
+    ("requires", "python"), [(">=3.14", "3.13"), (">=3.13.2", "3.13.1"), ("<3.13", "3.13")]
+)
+def test_minimum_leg_fails_when_the_release_excludes_the_python(
+    repo: Repo, tmp_path: Path, requires: str, python: str
+) -> None:
+    status, output, written = select(repo, tmp_path, "minimum", requires, python)
     assert status == 1
-    assert f"::error::Home Assistant 2026.3.0 requires Python {requires}, and this leg" in output
-    assert "Set python-minimum" in output
+    assert (
+        f"::error::Home Assistant 2026.3.0 requires Python {requires}, and python-minimum" in output
+    )
     assert "spec=" not in written
 
 
+def test_minimum_leg_fails_when_no_python_fits(repo: Repo, tmp_path: Path) -> None:
+    status, output, written = select(repo, tmp_path, "minimum", ">=3.15")
+    assert status == 1
+    assert "which no version from 3.12 to python-latest satisfies" in output
+    assert "spec=" not in written
+
+
+def test_minimum_leg_names_the_releases_that_a_plugin_pins(repo: Repo, tmp_path: Path) -> None:
+    others = {number: pin for number, pin in PINNED.items() if number != "0.13.302"}
+    status, output, written = select(repo, tmp_path, "minimum", plugins=others)
+    assert status == 1
+    assert (
+        f"::error::No {PLUGIN_NAME} release pins Home Assistant 2026.3.0. The releases near it "
+        "pin 2026.2.3, 2026.3.1: set homeassistant-minimum to one of them." in output
+    )
+    assert "spec=" not in written
+    status, output, _ = select(repo, tmp_path / "none", "minimum", plugins={})
+    assert "Set homeassistant-minimum to a release that it supports." in output
+
+
 def test_latest_leg_bounds_the_plugin(repo: Repo, tmp_path: Path) -> None:
-    assert workflow_env("PLUGIN") == "pytest-homeassistant-custom-component>=0.13"
-    status, output, written = select(repo, tmp_path, "latest", "")
+    assert workflow_env("PLUGIN") == f"{PLUGIN_NAME}>=0.13"
+    status, output, written = select(repo, tmp_path, "latest")
     assert status == 0, output
-    assert "spec=pytest-homeassistant-custom-component>=0.13\n" in written
+    assert f"spec={PLUGIN_NAME}>=0.13\n" in written
+    assert "python=3.14\n" in written
+    assert "plugin=" not in written
 
 
 @pytest.mark.parametrize(
@@ -278,6 +365,7 @@ def test_minimum_leg_installs_the_bounded_plugin(repo: Repo, tmp_path: Path) -> 
             "CUTOFF": "2026-03-11T12:00:00Z",
             "REQUIREMENTS": "requirements_test.txt",
             "PLUGIN": "zorbleplugin>=9",
+            "PLUGIN_SPEC": "zorbleplugin==9.1",
         },
     )
     finished = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -288,7 +376,7 @@ def test_minimum_leg_installs_the_bounded_plugin(repo: Repo, tmp_path: Path) -> 
         "install",
         "--system",
         "homeassistant==2026.3.0",
-        "zorbleplugin>=9",
+        "zorbleplugin==9.1",
     ]
     assert install[install.index("--requirement", 6) + 1] == "requirements_test.txt"
     assert install[install.index("--exclude-newer") + 1] == "2026-03-11T12:00:00Z"
@@ -296,3 +384,92 @@ def test_minimum_leg_installs_the_bounded_plugin(repo: Repo, tmp_path: Path) -> 
     name, cutoff = install[install.index("--exclude-newer-package") + 1].split("=")
     assert name == "zorblelib"
     assert started <= cutoff <= finished
+
+
+def build_app(
+    repo: Repo, tmp_path: Path, build: object | None, config: object | None = None
+) -> tuple[subprocess.CompletedProcess[str], list[str]]:
+    """Run the build step of ha-app.yml on an app whose files hold the given data.
+
+    The stand-in yq prints the JSON written next to each file, as yq -o=json
+    would print the YAML.
+    """
+    fake = tmp_path / "bin"
+    fake.mkdir(exist_ok=True)
+    calls = tmp_path / "docker.log"
+    (fake / "yq").write_text('#!/bin/sh\ncat "$3.json"\n', encoding="utf-8")
+    (fake / "docker").write_text(
+        f'#!/bin/sh\nfor arg in "$@"; do echo "$arg"; done > {calls}\n', encoding="utf-8"
+    )
+    for name in ("yq", "docker"):
+        (fake / name).chmod(0o755)
+    for name, data in (("build.yaml", build), ("config.yaml", config)):
+        if data is not None:
+            repo.write(f"zorble/{name}", "unused: true\n")
+            repo.write(f"zorble/{name}.json", json.dumps(data))
+    result = subprocess.run(
+        [
+            "bash",
+            "-e",
+            "-o",
+            "pipefail",
+            "-c",
+            step_script("Build image", WORKFLOWS / "ha-app.yml"),
+        ],
+        cwd=repo.root,
+        env={**os.environ, "PATH": f"{fake}{os.pathsep}{os.environ['PATH']}", "APP_PATH": "zorble"},
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    args = calls.read_text(encoding="utf-8").splitlines() if calls.exists() else []
+    return result, args
+
+
+def build_args(args: list[str]) -> list[str]:
+    return [args[index + 1] for index, arg in enumerate(args) if arg == "--build-arg"]
+
+
+DEFAULT_BASE = "BUILD_FROM=ghcr.io/home-assistant/amd64-base:latest"
+
+
+@pytest.mark.parametrize(
+    ("build", "base"),
+    [
+        (
+            {"build_from": {"amd64": "ghcr.io/zorble/amd64:1", "aarch64": "x"}},
+            "ghcr.io/zorble/amd64:1",
+        ),
+        ({"build_from": "ghcr.io/zorble/base:2"}, "ghcr.io/zorble/base:2"),
+        ({"build_from": {"aarch64": "x"}}, DEFAULT_BASE.split("=", 1)[1]),
+        ({"args": {}}, DEFAULT_BASE.split("=", 1)[1]),
+        (None, DEFAULT_BASE.split("=", 1)[1]),
+    ],
+)
+def test_app_build_from(repo: Repo, tmp_path: Path, build: object, base: str) -> None:
+    result, args = build_app(repo, tmp_path, build)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert build_args(args) == ["BUILD_ARCH=amd64", f"BUILD_FROM={base}"]
+    assert args[-1] == "zorble"
+
+
+def test_app_build_arguments(repo: Repo, tmp_path: Path) -> None:
+    build = {"args": {"ZORBLE_VERSION": "1.2", "WORKERS": 4, "BUILD_ARCH": "custom"}}
+    result, args = build_app(repo, tmp_path, build, {"version": "0.3.0", "slug": "zorble"})
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert build_args(args) == [
+        "BUILD_ARCH=amd64",
+        DEFAULT_BASE,
+        "BUILD_VERSION=0.3.0",
+        "ZORBLE_VERSION=1.2",
+        "WORKERS=4",
+        # The build file's own arguments come last, so they win.
+        "BUILD_ARCH=custom",
+    ]
+
+
+def test_app_build_rejects_other_build_from(repo: Repo, tmp_path: Path) -> None:
+    result, args = build_app(repo, tmp_path, {"build_from": ["ghcr.io/zorble/base:2"]})
+    assert result.returncode == 1
+    assert "::error::zorble: build_from must be an image or a map" in result.stdout
+    assert args == []

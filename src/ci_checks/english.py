@@ -87,8 +87,13 @@ TRANSLATION_EXTENSIONS = frozenset(
 DOC_EXTENSIONS = frozenset({"md", "rst", "txt"})
 # A language tag such as fr, fr-FR, pt_BR, zh-Hant or es-419.
 _LANGUAGE_TAG = re.compile(r"([a-z]{2})(?:[-_](?:[A-Za-z]{2}|[A-Za-z]{4}|[0-9]{3}))*")
-# A document named after its language: README.fr.md, guide.pt-BR.md, README_fr.md.
-_LOCALIZED_DOC = re.compile(r"(?:.+\.|(?i:readme)[-_])(?P<tag>[^.]+)")
+# A document named after its language: README.fr.md, guide.pt-BR.md,
+# README_fr.md, README_FR.md or DOCS_fr.md. Only a name in capitals, as
+# README, takes a separator other than a dot: setup_os.md is about an OS.
+_LOCALIZED_DOC = re.compile(r"(?:.+\.|(?i:readme)[-_]|[A-Z][A-Z0-9]*[-_])(?P<tag>[^.]+)")
+# Language codes that file names more often use as words or abbreviations,
+# such as install.ha.md for Home Assistant or notes.to.md.
+AMBIGUOUS_CODES = frozenset({"am", "an", "as", "be", "ha", "is", "or", "os", "so", "to"})
 
 # Words that are French and not English, written without accents as people
 # often do. Words shared with English, even rare or British ones (correction,
@@ -174,9 +179,9 @@ ENGLISH_WORDS = frozenset(
 # English words that are spelled with accents or look French.
 ENGLISH_LOANWORDS = frozenset(
     """
-    cafe café cliché crème d'oh décor déjà entrée façade fiancé fiancée
-    flambé matinée naïve naïvety né née passé protégé purée résumé rôle
-    sauté señor soirée touché über
+    cafe café cliché crème d'oh décor déjà émigré entrée exposé façade fiancé
+    fiancée flambé matinée naïve naïvety né née négligée passé première
+    protégé purée résumé rôle sauté señor soirée touché über
     """.split()
 )
 _TOKEN = re.compile(r"\w+(?:['-]\w+)*")
@@ -186,6 +191,30 @@ _CONTRACTION = re.compile(r"(?:'s|n't|'re|'ll|'ve|'d|'m)$", re.IGNORECASE)
 _QUOTES = "\"'`"
 # Letters with French accents; ü is German or Turkish (Zürich, Türkiye).
 _FRENCH_ACCENTS = frozenset("àâæçéèêëîïôœùûÿ")
+# Endings of the accented words that start short French labels, such as
+# Créer, Sécurité, Allumée or Système, and that names rarely have: José,
+# Hélène, Clément, Amélie or Agnès stay names. Each comes with the shortest
+# word it applies to.
+_LABEL_ENDINGS = (
+    ("er", 5),
+    ("ité", 5),
+    ("ités", 6),
+    ("ée", 6),
+    ("ées", 6),
+    ("és", 6),
+    ("é", 6),
+    ("ème", 5),
+    ("èmes", 6),
+    ("ètre", 6),
+    ("ètres", 7),
+    ("être", 6),
+    ("êtres", 7),
+    ("ère", 6),
+    ("ères", 7),
+    ("ure", 6),
+    ("ures", 7),
+    ("ions", 7),
+)
 # Punctuation that, before a word, shows that the word does not start a
 # sentence.
 _MID_SENTENCE = frozenset(",;")
@@ -237,6 +266,13 @@ def _has_french_ending(word: str) -> bool:
     )
 
 
+def _is_label_word(word: str) -> bool:
+    """Return whether a lowercase accented word ends as French label words do."""
+    return any(
+        word.endswith(ending) and len(word) >= shortest for ending, shortest in _LABEL_ENDINGS
+    )
+
+
 def _word_kind(word: str, allowed: frozenset[str], initial: bool) -> Kind | None:
     """Return what a word says about the language of its line, if anything.
 
@@ -262,8 +298,11 @@ def _word_kind(word: str, allowed: frozenset[str], initial: bool) -> Kind | None
         return "strong" if initial or word.islower() else "signal"
     if any(char in _FRENCH_ACCENTS for char in lower):
         # An accented letter alone (à la carte) or a capitalized word that may
-        # be a name (Genève) is only a signal.
-        return "strong" if len(word) > 1 and word.islower() else "signal"
+        # be a name (Genève) is only a signal, unless it starts a sentence
+        # and ends as a label does.
+        if len(word) > 1 and (word.islower() or (initial and _is_label_word(lower))):
+            return "strong"
+        return "signal"
     if word.islower() and _has_french_ending(bare):
         return "signal"
     if lower in WEAK_WORDS:
@@ -348,12 +387,21 @@ def looks_french(text: str, allowed: frozenset[str] = frozenset()) -> bool:
     return strong > 0 or signals >= SIGNAL_THRESHOLD or (signals >= 2 and english == 0)
 
 
-def _language(tag: str) -> str | None:
-    """Return the ISO 639-1 code of a language tag such as fr-FR, or None."""
+def _language(tag: str, name: bool = False) -> str | None:
+    """Return the ISO 639-1 code of a language tag such as fr-FR, or None.
+
+    In a file name (name=True), the tag may be in capitals, as in
+    README_FR.md, and a code that names something else more often counts
+    as no language.
+    """
+    if name and tag[:2].isupper():
+        tag = tag[:2].lower() + tag[2:]
     match = _LANGUAGE_TAG.fullmatch(tag)
-    if match and match.group(1) in LANGUAGE_CODES:
-        return match.group(1)
-    return None
+    if not match or match.group(1) not in LANGUAGE_CODES:
+        return None
+    if name and match.group(1) in AMBIGUOUS_CODES:
+        return None
+    return match.group(1)
 
 
 def _originals(path: str) -> Iterator[str]:
@@ -370,7 +418,7 @@ def _originals(path: str) -> Iterator[str]:
     if (
         localized
         and extension.lower() in DOC_EXTENSIONS
-        and _language(localized["tag"]) not in (None, "en")
+        and _language(localized["tag"], name=True) not in (None, "en")
     ):
         original = stem[: localized.start("tag") - 1]
         separator = stem[localized.start("tag") - 1]

@@ -64,6 +64,10 @@ on:
         description: Package names exempted after a manual license review.
         type: string
         default: ""
+      license-python-version:
+        description: Python version used to resolve the runtime dependencies.
+        type: string
+        default: "3.14"
 
 permissions: {}
 
@@ -157,3 +161,4 @@ jobs:
           requirements: ${{ inputs.license-requirements }}
           allowed: ${{ inputs.license-allowed }}
           exceptions: ${{ inputs.license-exceptions }}
+          python-version: ${{ inputs.license-python-version }}

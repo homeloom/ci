@@ -579,3 +579,146 @@ def test_main_dependencies(
     assert "license 'GPL-3.0-only' is not allowed" in out
 
     assert licenses.main([*args[:3], "requirements.txt", "--allowed", "GPL-3.0-only"]) == 0
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("GNU Lesser General Public License v3 or later (LGPLv3+)", "LGPL-3.0-or-later"),
+        ("GNU General Public License v2 (GPLv2)", "GPL-2.0-only"),
+        ("LGPLv3+", "LGPL-3.0-or-later"),
+        ("LGPLv2.1", "LGPL-2.1-only"),
+        ("GPLv3", "GPL-3.0-only"),
+        ("MPL2", "MPL-2.0"),
+        ("MPL 2", "MPL-2.0"),
+        ("Mozilla Public License 2", "MPL-2.0"),
+    ],
+)
+def test_license_of_gnu_and_mozilla_names_without_classifiers(text: str, expected: str) -> None:
+    assert licenses.license_of(metadata(License=text)) == expected
+
+
+@pytest.mark.parametrize(
+    ("license_field", "classifiers", "expected", "verdict"),
+    [
+        ("BUSL-1.1", [f"{OSI}MIT License"], "BUSL-1.1 AND MIT", False),
+        ("Apache-2.0", [f"{OSI}MIT License"], "Apache-2.0 AND MIT", True),
+        (
+            "EPL-2.0 OR Zlib",
+            [f"{OSI}MIT License"],
+            "(EPL-2.0 OR Zlib) AND MIT",
+            True,
+        ),
+        ("LicenseRef-Bluefinch", [f"{OSI}MIT License"], "LicenseRef-Bluefinch AND MIT", False),
+        # Loose words leave the classifiers to decide.
+        ("Custom", [f"{OSI}MIT License"], "MIT", True),
+    ],
+)
+def test_license_field_that_contradicts_the_classifiers(
+    license_field: str, classifiers: list[str], expected: str, verdict: bool
+) -> None:
+    spdx = licenses.license_of(metadata(License=license_field, Classifier=classifiers))
+    assert spdx == expected
+    assert licenses.expression_allowed(spdx, ALLOWED) is verdict
+
+
+def test_unmapped_classifier_is_explained(capsys: Capture) -> None:
+    reporter = Reporter("Licenses")
+    spdx = licenses.license_of(metadata(Classifier=["License :: Freely Distributable"]))
+    licenses.check_dependencies([("lib", "1.0", spdx)], ALLOWED, [], reporter)
+    out = capsys.readouterr().out
+    assert "license 'LicenseRef-Freely-Distributable' is not allowed. A LicenseRef stands" in out
+    licenses.check_dependencies([("lib", "1.0", "GPL-3.0-only")], ALLOWED, [], reporter)
+    assert "LicenseRef" not in capsys.readouterr().out
+
+
+TEXTS = {
+    "0BSD": "Permission to use, copy, modify, and/or distribute this software for any purpose",
+    "Apache-2.0": "Apache License\n  Version 2.0, January 2004",
+    "BSD-2-Clause": "Redistribution and use in source and binary\nforms, with or without",
+    "BSD-3-Clause": (
+        "Redistribution and use in source and binary forms\n3. Neither the name of the copyright"
+    ),
+    "BSL-1.0": "Boost Software License - Version 1.0 - August 17th, 2003",
+    "CC0-1.0": "Creative Commons Legal Code\n\nCC0 1.0 Universal",
+    "GPL-2.0-or-later": "GNU GENERAL PUBLIC LICENSE\n  Version 2, June 1991",
+    "GPL-3.0-only": "GNU GENERAL PUBLIC LICENSE\n  Version 3, 29 June 2007",
+    "AGPL-3.0-only": "GNU AFFERO GENERAL PUBLIC LICENSE\n  Version 3, 19 November 2007",
+    "LGPL-2.1-only": "GNU LESSER GENERAL PUBLIC LICENSE\n  Version 2.1, February 1999",
+    "LGPL-3.0-or-later": "GNU LESSER GENERAL PUBLIC LICENSE\n  Version 3, 29 June 2007",
+    "ISC": "Permission to use, copy, modify, and distribute this software",
+    "MIT": MIT_TEXT,
+    "MPL-2.0": "Mozilla Public License Version 2.0\n==================================",
+    "Unlicense": "This is free and unencumbered software released into the public domain.",
+    "Zlib": "2. Altered source versions must be plainly marked as such, and must not be",
+}
+
+
+@pytest.mark.parametrize("spdx", sorted(TEXTS))
+def test_license_file_fingerprints(tmp_path: Path, capsys: Capture, spdx: str) -> None:
+    path = tmp_path / "LICENSE"
+    path.write_text(TEXTS[spdx], encoding="utf-8")
+    reporter = Reporter("Licenses")
+    licenses.check_license_file(path, spdx.lower(), reporter)
+    assert reporter.count == 0, capsys.readouterr().out
+    path.write_text(TEXTS["MIT" if spdx != "MIT" else "ISC"], encoding="utf-8")
+    licenses.check_license_file(path, spdx, reporter)
+    assert reporter.count == 1
+    assert f"LICENSE does not look like the {spdx} license." in capsys.readouterr().out
+
+
+def test_every_fingerprint_is_tested() -> None:
+    # A license that shares the phrases of a tested one is tested with it.
+    tested = {licenses.LICENSE_FINGERPRINTS[name] for name in TEXTS}
+    assert set(licenses.LICENSE_FINGERPRINTS.values()) <= tested
+
+
+def test_license_file_with_an_unknown_identifier_warns(tmp_path: Path, capsys: Capture) -> None:
+    path = tmp_path / "LICENSE"
+    path.write_text("Bluefinch terms\n", encoding="utf-8")
+    reporter = Reporter("Licenses")
+    licenses.check_license_file(path, "EUPL-1.2", reporter)
+    assert reporter.count == 0
+    assert "LICENSE is not compared with the EUPL-1.2 license" in capsys.readouterr().out
+
+
+def test_app_requirements(tmp_path: Path) -> None:
+    for folder in ("zorble", "quillmore", "docs", ".github/ISSUE_TEMPLATE"):
+        (tmp_path / folder).mkdir(parents=True)
+    for path in ("zorble/Dockerfile", "zorble/config.yaml", "zorble/requirements.txt"):
+        (tmp_path / path).write_text("x\n", encoding="utf-8")
+    # A Dockerfile without an app configuration is not an app, nor is a
+    # configuration without a Dockerfile.
+    for path in ("quillmore/Dockerfile", "quillmore/requirements.txt"):
+        (tmp_path / path).write_text("x\n", encoding="utf-8")
+    for path in (".github/ISSUE_TEMPLATE/config.yml", "docs/config.json"):
+        (tmp_path / path).write_text("x\n", encoding="utf-8")
+    (tmp_path / "Dockerfile").write_text("x\n", encoding="utf-8")
+    (tmp_path / "config.json").write_text("{}\n", encoding="utf-8")
+    assert licenses.app_requirements(tmp_path) == [tmp_path / "zorble" / "requirements.txt"]
+    (tmp_path / "requirements.txt").write_text("x\n", encoding="utf-8")
+    assert licenses.app_requirements(tmp_path) == [
+        tmp_path / "requirements.txt",
+        tmp_path / "zorble" / "requirements.txt",
+    ]
+
+
+def test_main_checks_app_requirements_once(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    (tmp_path / "LICENSE").write_text(MIT_TEXT, encoding="utf-8")
+    app = tmp_path / "zorble"
+    app.mkdir()
+    for name in ("Dockerfile", "config.yaml", "requirements.txt"):
+        (app / name).write_text("x\n", encoding="utf-8")
+    seen: list[list[Path]] = []
+
+    def fake_install(
+        requirements: list[str], files: list[Path], target: Path, python_version: str
+    ) -> None:
+        seen.append(files)
+        assert python_version == "3.13"
+        target.mkdir(parents=True)
+
+    monkeypatch.setattr(licenses, "install", fake_install)
+    args = ["--root", str(tmp_path), "--python-version", "3.13"]
+    assert licenses.main([*args, "--requirements", "zorble/requirements.txt"]) == 0
+    assert seen == [[app / "requirements.txt"]]

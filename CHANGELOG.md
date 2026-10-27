@@ -6,6 +6,38 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.2.2]
+
+### Changed
+
+- Licenses: the LICENSE file is compared with the text of the common
+  permissive, GNU and Mozilla licenses, whatever the case of `license`, and
+  the job warns when it does not know the text of the expected license.
+- Licenses: the `requirements.txt` of Home Assistant apps (a folder with a
+  `Dockerfile` and a `config.yaml`, `config.yml` or `config.json`) is
+  checked. `hygiene.yml` takes `license-python-version`.
+- Licenses: GNU classifier names and short names such as `LGPLv3+`, `GPLv2`
+  or `MPL2` in the License field are translated. A License field that names
+  licenses the classifiers contradict is combined with them, so both must
+  be allowed, and a license that comes from a classifier without an SPDX
+  identifier is explained.
+- Language: tags in capitals (`README_FR.md`), names in capitals with a
+  separator (`DOCS_fr.md`) and codes that file names use for something else
+  (`docs/install.ha.md`) are classified right. An accented word that
+  starts a sentence and has an ending of French labels, such as the one of
+  verbs in the infinitive, counts as French.
+- Binary content that starts with the bytes of a UTF-16 or UTF-32 byte
+  order mark is no longer read as text.
+- `ha-tests.yml`: the minimum leg derives its Python from the oldest Home
+  Assistant version (`python-minimum` defaults to empty) and installs the
+  `pytest-homeassistant-custom-component` release that pins that version,
+  naming the nearby pinned versions when none does.
+- `release.yml`: a tag on another commit, or a tag without a GitHub
+  release, fails instead of passing silently.
+- `ha-app.yml`: `build_from` may be one image, a map without `amd64` or
+  missing, as for the Supervisor; `BUILD_VERSION` and the `args` of the
+  build file are passed.
+
 ## [0.2.1]
 
 ### Changed

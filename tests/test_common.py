@@ -5,6 +5,7 @@ from __future__ import annotations
 import codecs
 import json
 import os
+import random
 import subprocess
 from pathlib import Path
 
@@ -53,6 +54,17 @@ def test_decode_text() -> None:
     assert _common.decode_text(codecs.BOM_UTF16_LE + "hé\n".encode("utf-16-le")) == "hé\n"
     assert _common.decode_text(codecs.BOM_UTF16_BE + "hé".encode("utf-16-be")) == "hé"
     assert _common.decode_text(codecs.BOM_UTF32_LE + "hé".encode("utf-32-le")) == "hé"
+    # Text in other scripts is text.
+    greeting = "Bluefinch: 你好, Привет, こんにちは\n"
+    assert _common.decode_text(codecs.BOM_UTF16_LE + greeting.encode("utf-16-le")) == greeting
+
+
+@pytest.mark.parametrize("bom", [codecs.BOM_UTF16_LE, codecs.BOM_UTF16_BE, codecs.BOM_UTF32_LE])
+def test_binary_content_that_starts_like_a_byte_order_mark_is_binary(bom: bytes) -> None:
+    generator = random.Random(7)
+    for _ in range(20):
+        data = bom + bytes(generator.randrange(256) for _ in range(400))
+        assert _common.decode_text(data) is None
 
 
 def test_split_lines() -> None:

@@ -10,6 +10,7 @@ import re
 import subprocess
 import sys
 import tempfile
+import unicodedata
 from collections.abc import Iterable, Iterator
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -167,7 +168,10 @@ def decode_text(data: bytes) -> str | None:
         ((codecs.BOM_UTF16_LE, codecs.BOM_UTF16_BE), "utf-16"),
     ):
         if data.startswith(boms):
-            return data.decode(encoding, errors="replace")
+            # Binary content can start with the same bytes, and then decodes
+            # to code points that text does not use.
+            text = data.decode(encoding, errors="replace")
+            return text if _plausible_wide_text(text) else None
     if b"\0" not in data[:BINARY_SNIFF_BYTES]:
         return data.decode("utf-8-sig", LEGACY)
     return _utf16_without_bom(data)
@@ -182,6 +186,16 @@ def _utf16_without_bom(data: bytes) -> str | None:
             text = data[: len(data) - len(data) % 2].decode(encoding, errors="replace")
             return text if mostly_printable(text) else None
     return None
+
+
+def _plausible_wide_text(text: str) -> bool:
+    """Return whether UTF-16 or UTF-32 text reads as text, not as decoded binary bytes.
+
+    Random bytes decode to many unassigned, private use and surrogate code
+    points, and to replacement characters, which real text has very few of.
+    """
+    odd = sum(char == "\ufffd" or unicodedata.category(char) in ("Cn", "Co", "Cs") for char in text)
+    return mostly_printable(text) and odd <= len(text) * 0.01
 
 
 def mostly_printable(text: str) -> bool:
