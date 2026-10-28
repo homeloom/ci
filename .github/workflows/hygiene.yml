@@ -68,13 +68,20 @@ on:
         description: Python version used to resolve the runtime dependencies.
         type: string
         default: "3.14"
+      runs-on:
+        description: >-
+          Runner of every job, as JSON: a label in double quotes, a list of
+          labels or a runner group object. Defaults to the CI_RUNS_ON
+          variable, then to "ubuntu-24.04".
+        type: string
+        default: ""
 
 permissions: {}
 
 jobs:
   hygiene:
     name: Hygiene
-    runs-on: ubuntu-24.04
+    runs-on: ${{ fromJSON(inputs.runs-on || vars.CI_RUNS_ON || '"ubuntu-24.04"') }}
     timeout-minutes: 10
     permissions:
       contents: read
@@ -144,7 +151,7 @@ jobs:
 
   licenses:
     name: Licenses
-    runs-on: ubuntu-24.04
+    runs-on: ${{ fromJSON(inputs.runs-on || vars.CI_RUNS_ON || '"ubuntu-24.04"') }}
     timeout-minutes: 10
     permissions:
       contents: read

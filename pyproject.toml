@@ -1,6 +1,6 @@
 [project]
 name = "homeloom-ci"
-version = "0.2.2"
+version = "0.2.3"
 description = "Shared CI workflows and checks for Home Assistant repositories."
 readme = "README.md"
 license = "MIT"

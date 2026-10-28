@@ -10,13 +10,20 @@ on:
         description: JSON array of app directories, for example ["my_app"].
         type: string
         required: true
+      runs-on:
+        description: >-
+          Runner of every job, as JSON: a label in double quotes, a list of
+          labels or a runner group object. Defaults to the CI_RUNS_ON
+          variable, then to "ubuntu-24.04".
+        type: string
+        default: ""
 
 permissions: {}
 
 jobs:
   app:
     name: App (${{ matrix.path }})
-    runs-on: ubuntu-24.04
+    runs-on: ${{ fromJSON(inputs.runs-on || vars.CI_RUNS_ON || '"ubuntu-24.04"') }}
     timeout-minutes: 20
     permissions:
       contents: read

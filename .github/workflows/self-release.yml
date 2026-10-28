@@ -29,3 +29,5 @@ jobs:
     with:
       sha: ${{ github.event.workflow_run.head_sha }}
       version-file: pyproject.toml
+      # Public repository: always a GitHub-hosted runner, see ci.yml.
+      runs-on: '"ubuntu-24.04"'
