@@ -488,10 +488,10 @@ libraries of a headless browser.
 A self-hosted runner keeps its tool cache from one job to the next, and with
 it every package installed into a Python of `setup-python`. So no job of
 these workflows installs into it: `ha-tests.yml` installs into a virtual
-environment under `RUNNER_TEMP`, the license check into a temporary
-directory, and `actions/setup-tools` its tools under `RUNNER_TEMP`, which the
-runner empties after each job. A job that a repository adds itself should do
-the same, for example:
+environment under `RUNNER_TEMP`, with its uv cache beside it, the license
+check into a temporary directory, and `actions/setup-tools` its tools under
+`RUNNER_TEMP`, which the runner empties after each job. A job that a
+repository adds itself should do the same, for example:
 
 ```yaml
 - name: Create a virtual environment
@@ -502,6 +502,11 @@ the same, for example:
 
 Otherwise, test plugins installed by one job load in the tests of another,
 and the two legs of `ha-tests.yml` mix their versions of Home Assistant.
+
+When the environment holds Home Assistant, put it on `PATH` only in the steps
+that run the tests, as `ha-tests.yml` does: Home Assistant installs its own,
+older uv into the environment, which would otherwise run instead of the
+pinned one.
 
 ## Organization settings
 

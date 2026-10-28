@@ -6,6 +6,21 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.2.5]
+
+### Fixed
+
+- `ha-tests.yml` no longer puts its virtual environment on `PATH` for the
+  rest of the job, only in the test step. Home Assistant installs its own,
+  older uv into the environment, so since 0.2.4 the "Prune uv cache" step ran
+  that uv, which fails on a cache written by the pinned one when no package
+  was built from source.
+- The uv cache of `ha-tests.yml` moves from `~/.cache/uv` to `RUNNER_TEMP`,
+  on the same file system as the virtual environment, so that uv links the
+  files it installs instead of copying them. The cache path is part of the
+  cache version, so the first run of each repository after the update starts
+  without a cache.
+
 ## [0.2.4]
 
 ### Fixed
