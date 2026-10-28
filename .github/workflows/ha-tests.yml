@@ -222,6 +222,17 @@ jobs:
         with:
           tools: uv
 
+      # A self-hosted runner keeps the Python of the tool cache from one job
+      # to the next, so nothing is installed into it: the test plugins would
+      # load in the tests of other jobs. The virtual environment goes away
+      # with RUNNER_TEMP at the end of the job.
+      - name: Create a virtual environment
+        run: |
+          venv="${RUNNER_TEMP}/ha-tests-venv"
+          uv venv --quiet --python "$(command -v python)" "$venv"
+          echo "${venv}/bin" >> "$GITHUB_PATH"
+          echo "VIRTUAL_ENV=${venv}" >> "$GITHUB_ENV"
+
       - name: Cache uv downloads
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
@@ -258,8 +269,8 @@ jobs:
               args+=(--exclude-newer-package "${name}=${now}")
             done < <(sed -nE 's/^[[:space:]]*([A-Za-z0-9][A-Za-z0-9._-]*).*/\1/p' "$runtime")
           fi
-          uv pip install --system "${args[@]}"
-          uv pip show --system homeassistant pytest-homeassistant-custom-component | grep -E '^(Name|Version):'
+          uv pip install --python "${VIRTUAL_ENV}/bin/python" "${args[@]}"
+          uv pip show --python "${VIRTUAL_ENV}/bin/python" homeassistant pytest-homeassistant-custom-component | grep -E '^(Name|Version):'
 
       - name: Run tests
         env:

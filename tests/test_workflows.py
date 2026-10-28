@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
 import sys
 import textwrap
@@ -366,24 +367,61 @@ def test_minimum_leg_installs_the_bounded_plugin(repo: Repo, tmp_path: Path) -> 
             "REQUIREMENTS": "requirements_test.txt",
             "PLUGIN": "zorbleplugin>=9",
             "PLUGIN_SPEC": "zorbleplugin==9.1",
+            "VIRTUAL_ENV": "/venv",
         },
     )
     finished = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
     assert result.returncode == 0, result.stdout + result.stderr
     install = calls.read_text(encoding="utf-8").splitlines()[0].split()
-    assert install[:5] == [
+    assert install[:6] == [
         "pip",
         "install",
-        "--system",
+        "--python",
+        "/venv/bin/python",
         "homeassistant==2026.3.0",
         "zorbleplugin==9.1",
     ]
-    assert install[install.index("--requirement", 6) + 1] == "requirements_test.txt"
+    assert install[install.index("--requirement", 7) + 1] == "requirements_test.txt"
     assert install[install.index("--exclude-newer") + 1] == "2026-03-11T12:00:00Z"
     # The integration's own requirements are resolved as of now.
     name, cutoff = install[install.index("--exclude-newer-package") + 1].split("=")
     assert name == "zorblelib"
     assert started <= cutoff <= finished
+
+
+def test_tests_install_into_a_virtual_environment(repo: Repo, tmp_path: Path) -> None:
+    # A self-hosted runner keeps the Python of the tool cache between jobs, so
+    # no step may install into it.
+    fake = tmp_path / "bin"
+    fake.mkdir()
+    calls = tmp_path / "calls"
+    uv = fake / "uv"
+    uv.write_text(f'#!/bin/sh\necho "$@" >> {calls}\n', encoding="utf-8")
+    uv.chmod(0o755)
+    (tmp_path / "runner").mkdir()
+    github_path = tmp_path / "github_path"
+    github_env = tmp_path / "github_env"
+    result = run_step(
+        repo,
+        tmp_path,
+        "Create a virtual environment",
+        bin_dir=fake,
+        extra={"GITHUB_PATH": str(github_path), "GITHUB_ENV": str(github_env)},
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    venv = tmp_path / "runner" / "ha-tests-venv"
+    python = shutil.which("python", path=str(Path(sys.executable).parent))
+    assert calls.read_text(encoding="utf-8").split() == [
+        "venv",
+        "--quiet",
+        "--python",
+        str(python),
+        str(venv),
+    ]
+    assert github_path.read_text(encoding="utf-8") == f"{venv}/bin\n"
+    assert github_env.read_text(encoding="utf-8") == f"VIRTUAL_ENV={venv}\n"
+    for workflow in WORKFLOWS.glob("*.yml"):
+        assert "--system" not in workflow.read_text(encoding="utf-8"), workflow.name
 
 
 def build_app(

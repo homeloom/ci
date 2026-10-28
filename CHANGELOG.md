@@ -6,6 +6,17 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.2.4]
+
+### Fixed
+
+- `ha-tests.yml` installs Home Assistant and the test requirements into a
+  virtual environment under `RUNNER_TEMP`, no longer into the Python of
+  `setup-python`. A self-hosted runner keeps that Python between jobs, so the
+  packages of one job loaded in the next: the two legs mixed their versions of
+  Home Assistant, and the integration's test plugins broke other test jobs.
+  The README says how a repository's own jobs do the same.
+
 ## [0.2.3]
 
 ### Added

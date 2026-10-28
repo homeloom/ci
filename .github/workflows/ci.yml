@@ -76,8 +76,14 @@ jobs:
         with:
           tools: uv gitleaks
 
+      # As in ha-tests.yml: nothing is installed into the Python of the
+      # tool cache, which a self-hosted runner keeps between jobs.
       - name: Install test dependencies
-        run: uv pip install --system --require-hashes --requirement requirements-dev.txt
+        run: |
+          venv="${RUNNER_TEMP}/ci-venv"
+          uv venv --quiet --python "$(command -v python)" "$venv"
+          uv pip install --python "${venv}/bin/python" --require-hashes --requirement requirements-dev.txt
+          echo "${venv}/bin" >> "$GITHUB_PATH"
 
       - name: Run tests
         run: python -m pytest
