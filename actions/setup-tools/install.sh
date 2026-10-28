@@ -47,8 +47,23 @@ for tool in ${TOOLS}; do
       ;;
   esac
   archive="${work_dir}/${tool}.tar.gz"
-  curl --fail --silent --show-error --location --retry 3 \
-    --connect-timeout 10 --max-time 120 --output "$archive" "$url"
+  # curl retries timeouts and 408, 429 and 5xx answers by itself, but a
+  # passing 403 from the release storage fails at once, so the whole
+  # download is tried again. Whatever attempt succeeds, the archive kept is
+  # checked against its digest before anything is unpacked.
+  for attempt in 1 2 3; do
+    if curl --fail --silent --show-error --location --retry 3 \
+      --connect-timeout 10 --max-time 120 --output "$archive" "$url"; then
+      break
+    fi
+    if (( attempt == 3 )); then
+      echo "::error::Could not download ${tool} ${version} after 3 attempts."
+      exit 1
+    fi
+    wait_seconds=$(( attempt == 1 ? 5 : 15 ))
+    echo "::warning::Download of ${tool} ${version} failed, trying again in ${wait_seconds} s."
+    sleep "$wait_seconds"
+  done
   echo "${sha256}  ${archive}" | sha256sum --check --quiet
   tar -xzf "$archive" -C "$work_dir" "$member"
   install -m 0755 "${work_dir}/${member}" "${bin_dir}/${tool}"

@@ -6,6 +6,24 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.2.3]
+
+### Added
+
+- Every job of the reusable workflows runs on the runner that the new
+  `runs-on` input names, else the `CI_RUNS_ON` configuration variable of the
+  calling repository or its organization, else `ubuntu-24.04`. The value is
+  JSON, so it can name self-hosted runners by labels or by runner group. The
+  Report job of the templates follows the same variable, and the CI of this
+  repository always stays on GitHub-hosted runners. The README lists what a
+  self-hosted runner needs.
+
+### Fixed
+
+- `setup-tools` tries a failed download twice more, after 5 then 15
+  seconds, since curl does not retry a 403 by itself. The archive kept is
+  still checked against its digest.
+
 ## [0.2.2]
 
 ### Changed

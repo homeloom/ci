@@ -428,6 +428,63 @@ Without an asset, a single Release job runs, as in earlier versions. With
   deleted. The build never runs in the job that holds the token that may
   write releases.
 
+## Runners
+
+Every job of the reusable workflows runs on the runner that the `runs-on`
+input names, else the one that the `CI_RUNS_ON` configuration variable names,
+else on `ubuntu-24.04`. The value is JSON, as `fromJSON` reads it:
+
+| Value | Runner |
+| --- | --- |
+| `"ubuntu-24.04"` | A GitHub-hosted runner, the default. The quotes are part of the value. |
+| `["self-hosted", "linux", "x64", "ci"]` | A self-hosted runner that has every one of these labels. |
+| `{"group": "ci", "labels": ["linux"]}` | A runner of the `ci` runner group with these labels. |
+
+A value that is not valid JSON fails the job. A called workflow runs in the
+context of the repository that calls it, so `vars.CI_RUNS_ON` is the variable
+of that repository, or else of its organization. The Report job of the
+templates reads the same variable, so that a whole run moves at once.
+
+Self-hosted runners are for private repositories only. Anyone can open a pull
+request on a public repository, and its code would then run on the machine
+of the runner:
+
+- Create the organization variable with the **Private repositories** access
+  policy, and keep the runner group closed to public repositories, which is
+  the default. A public repository then does not see the variable, and runs
+  on GitHub-hosted runners.
+- A repository that becomes public returns to GitHub-hosted runners by
+  itself under that policy. Otherwise, give it a repository variable
+  `CI_RUNS_ON` set to `"ubuntu-24.04"`, which takes precedence over the
+  organization variable.
+- The CI of this repository, which is public, always passes `"ubuntu-24.04"`.
+- Register the runners as ephemeral, so that each one runs a single job and
+  starts the next one clean. The license job installs third party packages
+  that may run their build code, and the jobs receive the secrets and the
+  token of the calling repository.
+
+The jobs expect what the GitHub-hosted `ubuntu-24.04` image provides. A
+self-hosted runner needs:
+
+- Linux on x64: `actions/setup-tools` installs Linux x64 builds only.
+  Ubuntu 24.04 is the safe choice, because `actions/setup-python` and
+  `actions/setup-node` download builds made for a given Ubuntu release.
+- `bash`, coreutils (`sha256sum`), `curl`, `tar`, `git`, `jq`, the GitHub CLI
+  `gh` (release) and `yq` 4 by Mike Farah (`ha-app.yml`), not the Python
+  `yq` wrapper.
+- Python 3.12 or later as `python3`: the checks run on the system Python of
+  the runner, without `setup-python`.
+- Docker, usable by the runner: the hassfest, HACS and app linter actions run
+  container images, and `ha-app.yml` builds the app images. When the runner
+  itself runs in a container that uses the Docker socket of its host, mount
+  its work directory at the same path on the host and in the container,
+  because container actions mount the workspace by that path.
+- A writable tool cache, where `setup-python` and `setup-node` install their
+  versions, and outbound HTTPS to GitHub, `ghcr.io`, PyPI and npm.
+
+Jobs that a repository adds itself may need more, such as the system
+libraries of a headless browser.
+
 ## Organization settings
 
 - **Visibility**: GitHub only lets private repositories use workflows and

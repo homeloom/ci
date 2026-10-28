@@ -2,6 +2,10 @@ name: CI
 
 # CI of this repository. It calls the reusable workflows from the same
 # commit, so a change to a workflow is tested by the pull request that makes it.
+#
+# This repository is public, so every job runs on a GitHub-hosted runner,
+# whatever the CI_RUNS_ON variable says: a self-hosted runner must never run
+# code from a pull request that anyone can open.
 
 on:
   pull_request:
@@ -36,6 +40,7 @@ jobs:
       privacy-exclude: tests/*
       # The language check holds French word lists; its tests use French samples.
       english-exclude: src/ci_checks/english.py tests/*
+      runs-on: '"ubuntu-24.04"'
     # Passes every secret: the denylist is the sum of the secrets whose names
     # start with PRIVACY_DENYLIST, and only the checks' own code reads them.
     secrets: inherit
@@ -43,6 +48,8 @@ jobs:
   lint:
     if: github.event.pull_request.draft != true
     uses: ./.github/workflows/python-lint.yml
+    with:
+      runs-on: '"ubuntu-24.04"'
 
   tests:
     name: Tests

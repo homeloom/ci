@@ -37,7 +37,12 @@ After copying the files:
    can see, so every secret name stays neutral, and the denylists are
    numbered (`PRIVACY_DENYLIST_1`, `PRIVACY_DENYLIST_2`…) and never say what
    a list holds.
-5. Once the first pull request is merged, run the CI workflow by hand
+5. A public repository runs on GitHub-hosted runners only: the
+   organization variable `CI_RUNS_ON` must not reach it, or a repository
+   variable `CI_RUNS_ON` set to `"ubuntu-24.04"` must override it. A private
+   repository may run on self-hosted runners: see
+   [Runners](https://github.com/homeloom/ci#runners).
+6. Once the first pull request is merged, run the CI workflow by hand
    (Actions, CI, Run workflow). A manual run checks every commit of the
    history as new; do it before the first release and before making the
    repository public.
