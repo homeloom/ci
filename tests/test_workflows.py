@@ -62,6 +62,8 @@ def run_step(
     env |= {
         "PATH": f"{Path(sys.executable).parent}{os.pathsep}{env['PATH']}",
         "RUNNER_TEMP": str(tmp_path / "runner"),
+        # The environment of this test suite stands for the one of the job.
+        "VIRTUAL_ENV": str(Path(sys.executable).parent.parent),
         "COVERAGE_SOURCE": source,
         "COVERAGE_MINIMUM": "95",
     }
@@ -396,7 +398,7 @@ def test_tests_install_into_a_virtual_environment(repo: Repo, tmp_path: Path) ->
     fake.mkdir()
     calls = tmp_path / "calls"
     uv = fake / "uv"
-    uv.write_text(f'#!/bin/sh\necho "$@" >> {calls}\n', encoding="utf-8")
+    uv.write_text(f'#!/bin/sh\necho "$UV_CACHE_DIR" "$@" >> {calls}\n', encoding="utf-8")
     uv.chmod(0o755)
     (tmp_path / "runner").mkdir()
     github_path = tmp_path / "github_path"
@@ -410,18 +412,48 @@ def test_tests_install_into_a_virtual_environment(repo: Repo, tmp_path: Path) ->
     )
     assert result.returncode == 0, result.stdout + result.stderr
     venv = tmp_path / "runner" / "ha-tests-venv"
+    cache = tmp_path / "runner" / "uv-cache"
     python = shutil.which("python", path=str(Path(sys.executable).parent))
     assert calls.read_text(encoding="utf-8").split() == [
+        str(cache),
         "venv",
         "--quiet",
         "--python",
         str(python),
         str(venv),
     ]
-    assert github_path.read_text(encoding="utf-8") == f"{venv}/bin\n"
-    assert github_env.read_text(encoding="utf-8") == f"VIRTUAL_ENV={venv}\n"
+    assert github_env.read_text(encoding="utf-8") == f"VIRTUAL_ENV={venv}\nUV_CACHE_DIR={cache}\n"
+    # Home Assistant installs an older uv into the environment, which would
+    # run instead of the pinned one from the next step on.
+    assert not github_path.exists()
     for workflow in WORKFLOWS.glob("*.yml"):
         assert "--system" not in workflow.read_text(encoding="utf-8"), workflow.name
+
+
+def test_only_the_test_step_runs_from_the_virtual_environment(repo: Repo, tmp_path: Path) -> None:
+    venv = tmp_path / "venv"
+    (venv / "bin").mkdir(parents=True)
+    calls = tmp_path / "calls"
+    for name in ("python", "uv"):
+        tool = venv / "bin" / name
+        tool.write_text(f'#!/bin/sh\necho {name} "$@" >> {calls}\n', encoding="utf-8")
+        tool.chmod(0o755)
+    (tmp_path / "runner").mkdir()
+    extra = {"VIRTUAL_ENV": str(venv)}
+    assert run_step(repo, tmp_path, "Run tests", extra=extra).returncode == 0
+    assert [line.split()[:3] for line in calls.read_text(encoding="utf-8").splitlines()] == [
+        ["python", "-m", "pytest"],
+        ["python", "-m", "coverage"],
+    ]
+    calls.unlink()
+    fake = tmp_path / "bin"
+    fake.mkdir()
+    pinned = fake / "uv"
+    pinned.write_text(f'#!/bin/sh\necho pinned "$@" >> {calls}\n', encoding="utf-8")
+    pinned.chmod(0o755)
+    result = run_step(repo, tmp_path, "Prune uv cache", extra=extra, bin_dir=fake)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert calls.read_text(encoding="utf-8").split() == ["pinned", "cache", "prune", "--ci"]
 
 
 def build_app(

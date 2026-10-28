@@ -83,10 +83,12 @@ jobs:
           venv="${RUNNER_TEMP}/ci-venv"
           uv venv --quiet --python "$(command -v python)" "$venv"
           uv pip install --python "${venv}/bin/python" --require-hashes --requirement requirements-dev.txt
-          echo "${venv}/bin" >> "$GITHUB_PATH"
+          echo "VIRTUAL_ENV=${venv}" >> "$GITHUB_ENV"
 
       - name: Run tests
-        run: python -m pytest
+        run: |
+          export PATH="${VIRTUAL_ENV}/bin:${PATH}"
+          python -m pytest
 
       # As in ha-tests.yml: a pragma without a reason excludes nothing but
       # reads as if it did.

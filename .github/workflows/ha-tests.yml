@@ -222,24 +222,32 @@ jobs:
         with:
           tools: uv
 
-      # A self-hosted runner keeps the Python of the tool cache from one job
-      # to the next, so nothing is installed into it: the test plugins would
-      # load in the tests of other jobs. The virtual environment goes away
-      # with RUNNER_TEMP at the end of the job.
-      - name: Create a virtual environment
-        run: |
-          venv="${RUNNER_TEMP}/ha-tests-venv"
-          uv venv --quiet --python "$(command -v python)" "$venv"
-          echo "${venv}/bin" >> "$GITHUB_PATH"
-          echo "VIRTUAL_ENV=${venv}" >> "$GITHUB_ENV"
-
+      # The uv cache sits in RUNNER_TEMP, on the same file system as the
+      # virtual environment, so that uv links the files it installs rather
+      # than copying them.
       - name: Cache uv downloads
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
-          path: ~/.cache/uv
+          path: ${{ runner.temp }}/uv-cache
           key: uv-${{ matrix.name }}-${{ steps.select.outputs.python }}-${{ steps.select.outputs.week }}-${{ hashFiles(inputs.requirements, 'custom_components/*/manifest.json', 'hacs.json') }}
           restore-keys: |
             uv-${{ matrix.name }}-${{ steps.select.outputs.python }}-
+
+      # A self-hosted runner keeps the Python of the tool cache from one job
+      # to the next, so nothing is installed into it: the test plugins would
+      # load in the tests of other jobs. The virtual environment and the uv
+      # cache go away with RUNNER_TEMP at the end of the job.
+      #
+      # The environment is not added to PATH: Home Assistant installs an older
+      # uv into it, which would then run instead of the pinned one. Only the
+      # test step activates it.
+      - name: Create a virtual environment
+        run: |
+          venv="${RUNNER_TEMP}/ha-tests-venv"
+          export UV_CACHE_DIR="${RUNNER_TEMP}/uv-cache"
+          uv venv --quiet --python "$(command -v python)" "$venv"
+          echo "VIRTUAL_ENV=${venv}" >> "$GITHUB_ENV"
+          echo "UV_CACHE_DIR=${UV_CACHE_DIR}" >> "$GITHUB_ENV"
 
       - name: Install dependencies
         env:
@@ -301,6 +309,7 @@ jobs:
           show_missing = true
           skip_covered = true
           EOF
+          export PATH="${VIRTUAL_ENV}/bin:${PATH}"
           python -m pytest --cov --cov-config="$config" --cov-report=
           python -m coverage report --rcfile="$config" --fail-under="$COVERAGE_MINIMUM"
 
@@ -323,4 +332,5 @@ jobs:
 
       - name: Prune uv cache
         if: always()
-        run: uv cache prune --ci
+        run: |
+          uv cache prune --ci
