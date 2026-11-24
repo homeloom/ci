@@ -1,8 +1,9 @@
 name: Release asset
 description: >-
   Build the asset of a release: optionally install the npm development tools
-  and run a build command, then zip the contents of a folder and upload the
-  zip as a workflow artifact for the job that publishes the release.
+  and run a build command, then zip the contents of a folder into the runner's
+  temporary folder, for the release step of the same job. Nothing is uploaded
+  as a workflow artifact, so the artifact storage quota does not apply.
 inputs:
   build-command:
     description: >-
@@ -15,9 +16,10 @@ inputs:
   asset-name:
     description: File name of the zip, such as the `filename` of hacs.json.
     required: true
-  artifact:
-    description: Name of the workflow artifact that holds the zip.
-    default: release-asset
+outputs:
+  path:
+    description: Path of the zip.
+    value: ${{ steps.zip.outputs.path }}
 runs:
   using: composite
   steps:
@@ -50,19 +52,13 @@ runs:
       run: eval "$BUILD_COMMAND"
 
     - name: Zip
+      id: zip
       shell: bash
       env:
         ASSET_PATH: ${{ inputs.asset-path }}
         ASSET_NAME: ${{ inputs.asset-name }}
         PYTHONPATH: ${{ github.action_path }}/../../src
-      run: >-
-        python3 -P -m ci_checks.release asset --path "$ASSET_PATH" --name "$ASSET_NAME"
-        --output "$RUNNER_TEMP/release-asset"
-
-    - name: Keep the zip
-      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-      with:
-        name: ${{ inputs.artifact }}
-        path: ${{ runner.temp }}/release-asset/${{ inputs.asset-name }}
-        if-no-files-found: error
-        retention-days: 1
+      run: |
+        python3 -P -m ci_checks.release asset --path "$ASSET_PATH" --name "$ASSET_NAME" \
+          --output "$RUNNER_TEMP/release-asset"
+        echo "path=$RUNNER_TEMP/release-asset/$ASSET_NAME" >> "$GITHUB_OUTPUT"

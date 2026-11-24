@@ -47,20 +47,22 @@ on:
 permissions: {}
 
 jobs:
-  # With an asset, first check whether this commit is released, so that the
-  # build only runs for a release. The build then runs in its own job,
-  # without the token that may write releases.
-  plan:
-    name: Plan
-    if: inputs.asset-path != '' || inputs.asset-name != '' || inputs.build-command != ''
+  # One job: the zip goes from the build to the release on the runner's
+  # disk, never through a workflow artifact, so that a full artifact storage
+  # quota cannot block a release. Only the release steps get the token that
+  # may write releases: the checkout keeps no credentials and the build steps
+  # get no token.
+  release:
+    name: Release
     runs-on: ${{ fromJSON(inputs.runs-on || vars.CI_RUNS_ON || '"ubuntu-24.04"') }}
-    timeout-minutes: 5
+    timeout-minutes: 15
     permissions:
-      contents: read
-    outputs:
-      release: ${{ steps.plan.outputs.release }}
+      contents: write
+    env:
+      WITH_ASSET: ${{ inputs.asset-path != '' || inputs.asset-name != '' || inputs.build-command != '' }}
     steps:
       - name: Check the inputs
+        if: env.WITH_ASSET == 'true'
         env:
           ASSET_PATH: ${{ inputs.asset-path }}
           ASSET_NAME: ${{ inputs.asset-name }}
@@ -74,11 +76,15 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ inputs.sha }}
+          # The parent tells whether this commit changed the version.
           fetch-depth: 2
           persist-credentials: false
 
+      # With an asset, first check whether this commit is released, so that
+      # the build only runs for a release.
       - name: Plan
         id: plan
+        if: env.WITH_ASSET == 'true'
         uses: $/actions/release
         with:
           sha: ${{ inputs.sha }}
@@ -86,59 +92,20 @@ jobs:
           changelog: ${{ inputs.changelog }}
           plan: "true"
 
-  build:
-    name: Build asset
-    needs: plan
-    if: needs.plan.outputs.release == 'true'
-    runs-on: ${{ fromJSON(inputs.runs-on || vars.CI_RUNS_ON || '"ubuntu-24.04"') }}
-    timeout-minutes: 10
-    permissions:
-      contents: read
-    steps:
-      - name: Check out
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          ref: ${{ inputs.sha }}
-          persist-credentials: false
-
       - name: Build and zip
+        id: asset
+        if: steps.plan.outputs.release == 'true'
         uses: $/actions/release-asset
         with:
           build-command: ${{ inputs.build-command }}
           asset-path: ${{ inputs.asset-path }}
           asset-name: ${{ inputs.asset-name }}
 
-  release:
-    name: Release
-    needs: [plan, build]
-    # Without an asset, Plan and Build are skipped and this job decides alone.
-    if: >-
-      !cancelled() && needs.plan.result != 'failure' && needs.build.result != 'failure' &&
-      (inputs.asset-path == '' || needs.build.result == 'success')
-    runs-on: ${{ fromJSON(inputs.runs-on || vars.CI_RUNS_ON || '"ubuntu-24.04"') }}
-    timeout-minutes: 5
-    permissions:
-      contents: write
-    steps:
-      - name: Check out
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          ref: ${{ inputs.sha }}
-          # The parent tells whether this commit changed the version.
-          fetch-depth: 2
-          persist-credentials: false
-
-      - name: Download the asset
-        if: inputs.asset-path != ''
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with:
-          name: release-asset
-          path: ${{ runner.temp }}/release-asset
-
       - name: Publish
+        if: env.WITH_ASSET != 'true' || steps.plan.outputs.release == 'true'
         uses: $/actions/release
         with:
           sha: ${{ inputs.sha }}
           version-file: ${{ inputs.version-file }}
           changelog: ${{ inputs.changelog }}
-          asset: ${{ inputs.asset-path != '' && format('{0}/release-asset/{1}', runner.temp, inputs.asset-name) || '' }}
+          asset: ${{ steps.asset.outputs.path }}

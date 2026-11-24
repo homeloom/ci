@@ -413,20 +413,22 @@ published as pre-releases. A tag that already exists must be this commit's
 release: a tag on another commit, or one without a GitHub release, fails
 the job instead of leaving the version unreleased.
 
-Without an asset, a single Release job runs, as in earlier versions. With
-`asset-path` and `asset-name`:
+A single Release job runs. With `asset-path` and `asset-name`, it:
 
-- A **Plan** job checks, with a read-only token, whether the commit is
-  released. Nothing is built otherwise, so a merge that does not change the
-  version costs one short job.
-- A **Build asset** job, read-only as well, runs the build and zips the
-  contents of the folder, without the folder itself, as HACS expects. Links
-  are refused and the zip is the same for the same files.
-- The **Release** job creates the release as a draft, uploads the zip and
-  only then publishes it, so that an installer never sees the release
-  without its asset. If the upload or the publication fails, the draft is
-  deleted. The build never runs in the job that holds the token that may
-  write releases.
+- first checks whether the commit is released. Nothing is built otherwise,
+  so a merge that does not change the version costs one short job.
+- runs the build and zips the contents of the folder, without the folder
+  itself, as HACS expects. Links are refused and the zip is the same for the
+  same files. The zip stays on the runner's disk: it is never uploaded as a
+  workflow artifact, so a full artifact storage quota does not block a
+  release.
+- creates the release as a draft, uploads the zip and only then publishes
+  it, so that an installer never sees the release without its asset. If the
+  upload or the publication fails, the draft is deleted.
+
+The job may write releases, but only the release steps get its token: the
+checkout keeps no credentials, the build steps get no token, and npm
+packages run no install scripts.
 
 ## Runners
 

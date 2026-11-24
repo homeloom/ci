@@ -6,6 +6,21 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.2.6]
+
+### Fixed
+
+- `release.yml` builds the asset and publishes the release in a single job.
+  The zip no longer goes through a workflow artifact, so a release with an
+  asset no longer fails when the artifact storage quota of the account is
+  full. The Plan and Build asset jobs are gone; the inputs do not change.
+
+### Changed
+
+- The `release-asset` action no longer uploads a workflow artifact and loses
+  its `artifact` input. It writes the zip to `RUNNER_TEMP` and gives its path
+  as the `path` output.
+
 ## [0.2.5]
 
 ### Fixed
